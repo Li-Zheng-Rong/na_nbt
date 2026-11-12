@@ -15,7 +15,7 @@ use std::{
 use simd_cesu8::DecodingError;
 use zerocopy::Unalign;
 
-use crate::MUTF8Str;
+use crate::{MUTF8Str, decode_mutf8_lossy, encode_mutf8};
 
 #[repr(C)]
 pub struct VecMut<'a, T> {
@@ -641,7 +641,7 @@ impl<'a> StringMut<'a> {
         let old_cap = self.cap.get();
 
         let data = unsafe { slice::from_raw_parts(old_ptr, old_len) };
-        let decoded = simd_cesu8::mutf8::decode_lossy(data);
+        let decoded = decode_mutf8_lossy(data);
 
         let mut string = match decoded {
             Cow::Borrowed(_) => {
@@ -661,7 +661,7 @@ impl<'a> StringMut<'a> {
         let result = f(&mut string);
 
         // Encode back to mutf8
-        let encoded = simd_cesu8::mutf8::encode(&string);
+        let encoded = encode_mutf8(&string);
 
         match encoded {
             Cow::Borrowed(_) => {
@@ -720,22 +720,22 @@ impl<'a> StringMut<'a> {
     /// Decodes the mutf8 content and returns the decoded string.
     #[inline]
     pub fn decode_lossy(&self) -> std::borrow::Cow<'_, str> {
-        simd_cesu8::mutf8::decode_lossy(self.as_bytes())
+        self.as_mutf8_str().decode_lossy()
     }
 
     #[inline]
     pub fn decode_strict(&self) -> std::result::Result<std::borrow::Cow<'_, str>, DecodingError> {
-        simd_cesu8::mutf8::decode_strict(self.as_bytes())
+        self.as_mutf8_str().decode_strict()
     }
 
     #[inline]
     pub fn decode(&self) -> std::result::Result<std::borrow::Cow<'_, str>, DecodingError> {
-        simd_cesu8::mutf8::decode(self.as_bytes())
+        self.as_mutf8_str().decode()
     }
 
     #[inline]
     pub fn decode_lossy_strict(&self) -> std::borrow::Cow<'_, str> {
-        simd_cesu8::mutf8::decode_lossy_strict(self.as_bytes())
+        self.as_mutf8_str().decode_lossy_strict()
     }
 
     /// Returns a raw pointer to the String's buffer.
@@ -1622,7 +1622,7 @@ impl StringOwn {
         let old_cap = self.cap.get();
 
         let data = unsafe { slice::from_raw_parts(old_ptr, old_len) };
-        let decoded = simd_cesu8::mutf8::decode_lossy(data);
+        let decoded = decode_mutf8_lossy(data);
 
         let mut string = match decoded {
             Cow::Borrowed(_) => {
@@ -1642,7 +1642,7 @@ impl StringOwn {
         let result = f(&mut string);
 
         // Encode back to mutf8
-        let encoded = simd_cesu8::mutf8::encode(&string);
+        let encoded = encode_mutf8(&string);
 
         match encoded {
             Cow::Borrowed(_) => {
@@ -1701,22 +1701,22 @@ impl StringOwn {
     /// Decodes the mutf8 content and returns the decoded string.
     #[inline]
     pub fn decode_lossy(&self) -> std::borrow::Cow<'_, str> {
-        simd_cesu8::mutf8::decode_lossy(self.as_bytes())
+        self.as_mutf8_str().decode_lossy()
     }
 
     #[inline]
     pub fn decode_strict(&self) -> std::result::Result<std::borrow::Cow<'_, str>, DecodingError> {
-        simd_cesu8::mutf8::decode_strict(self.as_bytes())
+        self.as_mutf8_str().decode_strict()
     }
 
     #[inline]
     pub fn decode(&self) -> std::result::Result<std::borrow::Cow<'_, str>, DecodingError> {
-        simd_cesu8::mutf8::decode(self.as_bytes())
+        self.as_mutf8_str().decode()
     }
 
     #[inline]
     pub fn decode_lossy_strict(&self) -> std::borrow::Cow<'_, str> {
-        simd_cesu8::mutf8::decode_lossy_strict(self.as_bytes())
+        self.as_mutf8_str().decode_lossy_strict()
     }
 
     /// Returns a raw pointer to the String's buffer.
@@ -1981,14 +1981,19 @@ impl From<&[u8]> for StringOwn {
 }
 
 impl From<String> for StringOwn {
+    #[inline]
     fn from(value: String) -> Self {
-        simd_cesu8::mutf8::encode(&value).into_owned().into()
+        match encode_mutf8(&value) {
+            std::borrow::Cow::Borrowed(_) => value.into_bytes().into(),
+            std::borrow::Cow::Owned(encoded) => encoded.into(),
+        }
     }
 }
 
 impl From<&str> for StringOwn {
+    #[inline]
     fn from(value: &str) -> Self {
-        simd_cesu8::mutf8::encode(value).into_owned().into()
+        encode_mutf8(value).into_owned().into()
     }
 }
 

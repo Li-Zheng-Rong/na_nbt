@@ -4,7 +4,7 @@ use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListOwn, MUTF8Str, NBT, StringOwn,
-    VecOwn, TagID, ValueOwn, cold_path,
+    TagID, ValueOwn, VecOwn, cold_path, encode_mutf8,
     mutable::{
         config::MutableConfig, size::mutable_tag_size, value_mut::MutValue, value_ref::RefValue,
     },
@@ -39,7 +39,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
     #[inline]
     pub fn get<'a>(&'a self, key: &str) -> Option<RefValue<'a, O>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
             Some(MutableConfig::<O>::read_value(tag_id, params))
@@ -52,7 +52,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
         key: &str,
     ) -> Option<T::TypeRef<'a, MutableConfig<O>>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
             if tag_id != T::TAG_ID {
@@ -66,7 +66,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
     #[inline]
     pub fn get_mut<'a>(&'a mut self, key: &str) -> Option<MutValue<'a, O>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
             Some(MutableConfig::<O>::read_value_mut(tag_id, params))
@@ -79,7 +79,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
         key: &str,
     ) -> Option<T::TypeMut<'a, MutableConfig<O>>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
             if tag_id != T::TAG_ID {
@@ -97,7 +97,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
         value: impl IntoNBT<O, Tag = T>,
     ) -> Option<ValueOwn<O>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let old = MutableConfig::<O>::compound_remove(self._to_write_params(), key);
             MutableConfig::<O>::compound_insert::<T>(
@@ -112,7 +112,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
     #[inline]
     pub fn remove(&mut self, key: &str) -> Option<ValueOwn<O>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             MutableConfig::<O>::compound_remove(self._to_write_params(), key)
         }

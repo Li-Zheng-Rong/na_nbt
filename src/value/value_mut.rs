@@ -16,6 +16,7 @@
 use crate::{
     CompoundBase, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListBase, MUTF8Str, MapMut, NBT,
     NBTBase, TagID, TypedListBase, ValueBase, ValueOwn, VisitMut, VisitMutShared, cold_path,
+    encode_mutf8,
     index::Index,
     tag::{
         Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
@@ -780,7 +781,7 @@ pub trait CompoundMut<'s>:
         's: 'a,
     {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let (tag_id, params) = Self::Config::compound_get(
                 self._to_read_params(),
                 MUTF8Str::from_mutf8_unchecked(&key),
@@ -795,7 +796,7 @@ pub trait CompoundMut<'s>:
         's: 'a,
     {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let (tag_id, params) = Self::Config::compound_get(
                 self._to_read_params(),
                 MUTF8Str::from_mutf8_unchecked(&key),
@@ -814,7 +815,7 @@ pub trait CompoundMut<'s>:
         's: 'a,
     {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let (tag_id, params) = Self::Config::compound_get(
                 self._to_read_params(),
                 MUTF8Str::from_mutf8_unchecked(&key),
@@ -829,7 +830,7 @@ pub trait CompoundMut<'s>:
         's: 'a,
     {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let (tag_id, params) = Self::Config::compound_get(
                 self._to_read_params(),
                 MUTF8Str::from_mutf8_unchecked(&key),
@@ -849,7 +850,7 @@ pub trait CompoundMut<'s>:
         value: impl IntoNBT<<Self::Config as ConfigRef>::ByteOrder, Tag = T>,
     ) -> Option<ValueOwn<<Self::Config as ConfigRef>::ByteOrder>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             let old = Self::Config::compound_remove(self._to_write_params(), key);
             Self::Config::compound_insert::<T>(self._to_write_params(), key, value.into_nbt());
@@ -860,7 +861,7 @@ pub trait CompoundMut<'s>:
     #[inline]
     fn remove(&mut self, key: &str) -> Option<ValueOwn<<Self::Config as ConfigRef>::ByteOrder>> {
         unsafe {
-            let key = simd_cesu8::mutf8::encode(key);
+            let key = encode_mutf8(key);
             let key = MUTF8Str::from_mutf8_unchecked(&key);
             Self::Config::compound_remove(self._to_write_params(), key)
         }
