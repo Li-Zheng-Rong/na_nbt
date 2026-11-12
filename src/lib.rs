@@ -169,7 +169,9 @@ mod view;
 mod write;
 
 pub use error::{Error, Result};
-pub use immutable::{read_borrowed, read_shared};
+pub use immutable::read_borrowed;
+#[cfg(feature = "shared")]
+pub use immutable::read_shared;
 use mutable::IntoNBT;
 pub use mutable::{
     CompoundOwn, ListOwn, TypedListOwn, ValueOwn, read_owned, read_owned_from_reader,

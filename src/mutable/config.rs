@@ -324,6 +324,10 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
             |_| panic!("End cannot be inserted into a compound"),
             |(mut params, key, value)| unsafe {
                 let name_bytes = key.as_bytes();
+                assert!(
+                    name_bytes.len() <= u16::MAX as usize,
+                    "compound key length too long"
+                );
                 let name_len = byteorder::U16::<O>::new(name_bytes.len() as u16).to_bytes();
                 let tag_size = mutable_tag_size(T::TAG_ID);
                 let old_len = params.len();
