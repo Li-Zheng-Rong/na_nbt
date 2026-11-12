@@ -3,9 +3,9 @@ use std::{marker::PhantomData, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundBase, CompoundRef, ConfigRef, EMPTY_COMPOUND, MUTF8Str, TagID, cold_path,
+    ByteOrder, CompoundBase, CompoundRef, ConfigRef, EMPTY_COMPOUND, MUTF8Str, TagID,
     immutable::{
-        config::ImmutableConfig, document::Document, mark::Mark, size::immutable_tag_size,
+        config::ImmutableConfig, document::Document, list::read_and_advance, mark::Mark,
         string::ReadonlyString, value::ReadonlyValue,
     },
 };
@@ -98,35 +98,24 @@ unsafe impl<'doc, O: ByteOrder, D: Document> Sync for ReadonlyCompoundIter<'doc,
 impl<'doc, O: ByteOrder, D: Document> Iterator for ReadonlyCompoundIter<'doc, O, D> {
     type Item = (ReadonlyString<'doc, D>, ReadonlyValue<'doc, O, D>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            let tag_id = *self.data.cast();
+            let ptr = self.data;
+            let tag_id = *ptr.cast::<TagID>();
 
             if tag_id == TagID::End {
-                cold_path();
                 return None;
             }
 
-            let name_len = byteorder::U16::<O>::from_bytes(*self.data.add(1).cast()).get();
+            let name_len = byteorder::U16::<O>::from_bytes(*ptr.add(1).cast()).get() as usize;
             let name = ReadonlyString {
-                data: MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(
-                    self.data.add(3),
-                    name_len as usize,
-                )),
+                data: MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(ptr.add(3), name_len)),
                 _doc: self.doc.clone(),
             };
 
-            let value = <ImmutableConfig<O, D> as ConfigRef>::read_value(
-                tag_id,
-                (self.data.add(3 + name_len as usize), self.mark, &self.doc),
-            );
-
-            self.data = self.data.add(1 + 2 + name_len as usize);
-
-            let (data_advance, mark_advance) =
-                immutable_tag_size::<O>(tag_id, self.data, self.mark);
-            self.data = self.data.add(data_advance);
-            self.mark = self.mark.add(mark_advance);
+            self.data = ptr.add(3 + name_len);
+            let value = read_and_advance::<O, D>(tag_id, &mut self.data, &mut self.mark, &self.doc);
 
             Some((name, value))
         }

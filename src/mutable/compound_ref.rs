@@ -3,9 +3,10 @@ use std::{marker::PhantomData, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundBase, CompoundRef, ConfigRef, EMPTY_COMPOUND, MUTF8Str, TagID, cold_path,
+    ByteOrder, CompoundBase, CompoundRef, ConfigRef, EMPTY_COMPOUND, MUTF8Str, TagID,
     mutable::{
-        config::MutableConfig, size::mutable_tag_size, string_ref::RefString, value_ref::RefValue,
+        config::MutableConfig, list_ref::read_ref_and_advance, string_ref::RefString,
+        value_ref::RefValue,
     },
 };
 
@@ -86,31 +87,23 @@ unsafe impl<'s, O: ByteOrder> Sync for RefCompoundIter<'s, O> {}
 impl<'s, O: ByteOrder> Iterator for RefCompoundIter<'s, O> {
     type Item = (RefString<'s>, RefValue<'s, O>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            let tag_id = *self.data.cast();
+            let ptr = self.data;
+            let tag_id = *ptr.cast::<TagID>();
 
             if tag_id == TagID::End {
-                cold_path();
                 return None;
             }
 
-            let name_len = byteorder::U16::<O>::from_bytes(*self.data.add(1).cast()).get();
+            let name_len = byteorder::U16::<O>::from_bytes(*ptr.add(1).cast()).get() as usize;
             let name = RefString {
-                data: MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(
-                    self.data.add(3),
-                    name_len as usize,
-                )),
+                data: MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(ptr.add(3), name_len)),
             };
 
-            let value = <MutableConfig<O> as ConfigRef>::read_value(
-                tag_id,
-                self.data.add(3 + name_len as usize),
-            );
-
-            self.data = self
-                .data
-                .add(3 + name_len as usize + mutable_tag_size(tag_id));
+            self.data = ptr.add(3 + name_len);
+            let value = read_ref_and_advance::<O>(tag_id, &mut self.data);
 
             Some((name, value))
         }

@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef, cold_path,
+    ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef,
     immutable::{
         config::ImmutableConfig, document::Document, mark::Mark, size::immutable_tag_size,
     },
@@ -62,6 +62,7 @@ impl<'doc, O: ByteOrder, D: Document, T: NBT> TypedListRef<'doc, T>
 {
     type Config = ImmutableConfig<O, D>;
 
+    #[inline]
     fn _to_read_params<'a>(&'a self) -> <Self::Config as ConfigRef>::ReadParams<'a>
     where
         'doc: 'a,
@@ -113,23 +114,47 @@ unsafe impl<'doc, O: ByteOrder, D: Document, T: NBT> Sync for ReadonlyTypedListI
 impl<'doc, O: ByteOrder, D: Document, T: NBT> Iterator for ReadonlyTypedListIter<'doc, O, D, T> {
     type Item = T::TypeRef<'doc, ImmutableConfig<O, D>>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
-            cold_path();
             return None;
         }
 
         self.remaining -= 1;
 
-        let value =
-            unsafe { ImmutableConfig::<O, D>::read::<T>((self.data, self.mark, &self.doc)) };
+        unsafe {
+            let cur_data = self.data;
+            let cur_mark = self.mark;
+            let (data_advance, mark_advance) = immutable_tag_size::<O>(T::TAG_ID, cur_data, cur_mark);
+            self.data = cur_data.add(data_advance);
+            self.mark = cur_mark.add(mark_advance);
+            Some(
+                ImmutableConfig::<O, D>::read::<T>((cur_data, cur_mark, &self.doc))
+                    .unwrap_unchecked(),
+            )
+        }
+    }
 
-        let (data_advance, mark_advance) =
-            unsafe { immutable_tag_size::<O>(T::TAG_ID, self.data, self.mark) };
-        self.data = unsafe { self.data.add(data_advance) };
-        self.mark = unsafe { self.mark.add(mark_advance) };
-
-        value
+    #[inline]
+    fn fold<B, F>(self, mut accum: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut cur_data = self.data;
+        let mut cur_mark = self.mark;
+        let doc = &self.doc;
+        unsafe {
+            for _ in 0..self.remaining {
+                let (data_advance, mark_advance) =
+                    immutable_tag_size::<O>(T::TAG_ID, cur_data, cur_mark);
+                let item = ImmutableConfig::<O, D>::read::<T>((cur_data, cur_mark, doc))
+                    .unwrap_unchecked();
+                cur_data = cur_data.add(data_advance);
+                cur_mark = cur_mark.add(mark_advance);
+                accum = f(accum, item);
+            }
+        }
+        accum
     }
 
     #[inline]

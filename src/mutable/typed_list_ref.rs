@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef, cold_path,
+    ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef,
     mutable::{config::MutableConfig, size::mutable_tag_size},
 };
 
@@ -93,19 +93,36 @@ unsafe impl<'s, O: ByteOrder, T: NBT> Sync for RefTypedListIter<'s, O, T> {}
 impl<'s, O: ByteOrder, T: NBT> Iterator for RefTypedListIter<'s, O, T> {
     type Item = T::TypeRef<'s, MutableConfig<O>>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
-            cold_path();
             return None;
         }
 
         self.remaining -= 1;
 
-        let value = unsafe { MutableConfig::<O>::read::<T>(self.data) };
+        unsafe {
+            let cur_data = self.data;
+            self.data = cur_data.add(mutable_tag_size(T::TAG_ID));
+            Some(MutableConfig::<O>::read::<T>(cur_data).unwrap_unchecked())
+        }
+    }
 
-        self.data = unsafe { self.data.add(mutable_tag_size(T::TAG_ID)) };
-
-        value
+    #[inline]
+    fn fold<B, F>(self, mut accum: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut cur_data = self.data;
+        let step = mutable_tag_size(T::TAG_ID);
+        unsafe {
+            for _ in 0..self.remaining {
+                let item = MutableConfig::<O>::read::<T>(cur_data).unwrap_unchecked();
+                cur_data = cur_data.add(step);
+                accum = f(accum, item);
+            }
+        }
+        accum
     }
 
     #[inline]
