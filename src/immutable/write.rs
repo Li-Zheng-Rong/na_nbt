@@ -3,7 +3,7 @@ use std::{any::TypeId, hint::unreachable_unchecked, io::Write, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, Error, NBT, Result, TagID, Writable, cold_path,
+    ByteOrder, Error, NBT, Result, TagID, Writable,
     immutable::{
         array::ReadonlyArray, compound::ReadonlyCompound, document::Document, list::ReadonlyList,
         string::ReadonlyString, typed_list::ReadonlyTypedList, value::ReadonlyValue,
@@ -23,7 +23,6 @@ pub unsafe fn write_compound_fallback<O: ByteOrder, R: ByteOrder>(mut buf: *mut 
             let tag_id = *buf.cast::<TagID>();
             buf = buf.add(1);
             if tag_id == TagID::End {
-                cold_path();
                 return buf.byte_offset_from_unsigned(buf_start);
             }
 
@@ -196,7 +195,6 @@ pub unsafe fn write_compound_to_writer_fallback<O: ByteOrder, R: ByteOrder>(
             let tag_id = *buf.cast::<TagID>();
             buf = buf.add(1);
             if tag_id == TagID::End {
-                cold_path();
                 writer.write_all(&[0]).map_err(Error::IO)?;
                 return Ok(buf.byte_offset_from_unsigned(buf_start));
             }

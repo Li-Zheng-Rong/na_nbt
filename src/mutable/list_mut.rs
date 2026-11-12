@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigMut, ConfigRef, ListBase, ListMut, VecMut, NBT, TagID, cold_path,
+    ByteOrder, ConfigMut, ConfigRef, ListBase, ListMut, NBT, TagID, VecMut,
     mutable::{
         config::MutableConfig, list_ref::RefListIter, size::mutable_tag_size,
         typed_list_mut::MutTypedList, value_mut::MutValue,
@@ -130,9 +130,9 @@ unsafe impl<'s, O: ByteOrder> Sync for MutListIter<'s, O> {}
 impl<'s, O: ByteOrder> Iterator for MutListIter<'s, O> {
     type Item = MutValue<'s, O>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
-            cold_path();
             return None;
         }
 

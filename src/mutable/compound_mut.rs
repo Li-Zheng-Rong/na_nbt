@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundBase, CompoundMut, ConfigMut, ConfigRef, MUTF8Str, VecMut, TagID, cold_path,
+    ByteOrder, CompoundBase, CompoundMut, ConfigMut, ConfigRef, MUTF8Str, TagID, VecMut,
     mutable::{
         compound_ref::RefCompoundIter, config::MutableConfig, size::mutable_tag_size,
         string_ref::RefString, value_mut::MutValue,
@@ -93,12 +93,12 @@ unsafe impl<'s, O: ByteOrder> Sync for MutCompoundIter<'s, O> {}
 impl<'s, O: ByteOrder> Iterator for MutCompoundIter<'s, O> {
     type Item = (RefString<'s>, MutValue<'s, O>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
             let tag_id = *self.data.cast();
 
             if tag_id == TagID::End {
-                cold_path();
                 return None;
             }
 

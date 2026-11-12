@@ -4,7 +4,7 @@ use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, Error, StringMut, NBT, CompoundOwn, ListOwn, StringOwn, TypedListOwn, ValueOwn,
-    Result, TagID, Writable, cold_path,
+    Result, TagID, Writable,
     mutable::{
         compound_mut::MutCompound,
         compound_ref::RefCompound,
@@ -45,7 +45,6 @@ pub unsafe fn write_compound<O: ByteOrder>(mut data: *const u8, out: &mut Vec<u8
             data = data.add(1);
 
             if tag_id == TagID::End {
-                cold_path();
                 let raw_len = data.byte_offset_from_unsigned(start);
                 if raw_len == 1 {
                     out.push(0);
@@ -312,7 +311,6 @@ pub unsafe fn write_compound_fallback<O: ByteOrder, R: ByteOrder>(
             data = data.add(1);
 
             if tag_id == TagID::End {
-                cold_path();
                 out.push(0);
                 return;
             }
@@ -758,7 +756,6 @@ pub unsafe fn write_compound_to_writer<O: ByteOrder>(
             data = data.add(1);
 
             if tag_id == TagID::End {
-                cold_path();
                 let raw_len = data.byte_offset_from_unsigned(start);
                 writer
                     .write_all(slice::from_raw_parts(start, raw_len))
@@ -984,7 +981,6 @@ pub unsafe fn write_compound_to_writer_fallback<O: ByteOrder, R: ByteOrder>(
             data = data.add(1);
 
             if tag_id == TagID::End {
-                cold_path();
                 writer.write_all(&[0]).map_err(Error::IO)?;
                 return Ok(());
             }

@@ -1546,6 +1546,7 @@ impl Write for VecOwn<u8> {
 }
 
 impl<T> From<Vec<T>> for VecOwn<T> {
+    #[inline]
     fn from(value: Vec<T>) -> Self {
         let mut me = ManuallyDrop::new(value);
         VecOwn {
@@ -1964,6 +1965,7 @@ impl Write for StringOwn {
 }
 
 impl From<Vec<u8>> for StringOwn {
+    #[inline]
     fn from(value: Vec<u8>) -> Self {
         let mut encoded = ManuallyDrop::new(value);
         StringOwn {
@@ -1998,6 +2000,7 @@ impl From<&str> for StringOwn {
 }
 
 impl From<&MUTF8Str> for StringOwn {
+    #[inline]
     fn from(value: &MUTF8Str) -> Self {
         value.as_bytes().into()
     }

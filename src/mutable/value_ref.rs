@@ -58,6 +58,7 @@ impl<'s, O: ByteOrder> ValueBase for RefValue<'s, O> {
 impl<'s, O: ByteOrder> ValueRef<'s> for RefValue<'s, O> {
     type Config = MutableConfig<O>;
 
+    #[inline]
     fn visit<'a, R>(&'a self, match_fn: impl FnOnce(VisitRef<'a, 's, Self::Config>) -> R) -> R
     where
         's: 'a,
@@ -79,6 +80,7 @@ impl<'s, O: ByteOrder> ValueRef<'s> for RefValue<'s, O> {
         }
     }
 
+    #[inline]
     fn map<R>(self, match_fn: impl FnOnce(MapRef<'s, Self::Config>) -> R) -> R {
         match self {
             RefValue::End(value) => match_fn(MapRef::End(value)),

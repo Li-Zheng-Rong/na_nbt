@@ -52,6 +52,7 @@ impl<'s, O: ByteOrder> ValueBase for MutValue<'s, O> {
 impl<'s, O: ByteOrder> ValueMut<'s> for MutValue<'s, O> {
     type Config = MutableConfig<O>;
 
+    #[inline]
     fn visit_shared<'a, R>(
         &'a self,
         match_fn: impl FnOnce(VisitMutShared<'a, 's, Self::Config>) -> R,
@@ -76,6 +77,7 @@ impl<'s, O: ByteOrder> ValueMut<'s> for MutValue<'s, O> {
         }
     }
 
+    #[inline]
     fn visit<'a, R>(&'a mut self, match_fn: impl FnOnce(VisitMut<'a, 's, Self::Config>) -> R) -> R
     where
         's: 'a,
@@ -97,6 +99,7 @@ impl<'s, O: ByteOrder> ValueMut<'s> for MutValue<'s, O> {
         }
     }
 
+    #[inline]
     fn map<R>(self, match_fn: impl FnOnce(MapMut<'s, Self::Config>) -> R) -> R {
         match self {
             MutValue::End(value) => match_fn(MapMut::End(value)),
@@ -115,6 +118,7 @@ impl<'s, O: ByteOrder> ValueMut<'s> for MutValue<'s, O> {
         }
     }
 
+    #[inline]
     #[allow(clippy::unit_arg)]
     fn to_ref<'a>(&'a self) -> RefValue<'a, O> {
         match self {

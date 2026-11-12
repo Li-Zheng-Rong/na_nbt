@@ -129,7 +129,6 @@ impl<O: ByteOrder> Drop for CompoundOwn<O> {
                 ptr = ptr.add(1);
 
                 if tag_id == TagID::End {
-                    cold_path();
                     debug_assert!(
                         ptr.byte_offset_from_unsigned(self.data.as_mut_ptr()) == self.data.len()
                     );

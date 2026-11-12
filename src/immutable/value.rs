@@ -59,6 +59,7 @@ impl<'doc, O: ByteOrder, D: Document> ValueBase for ReadonlyValue<'doc, O, D> {
 impl<'doc, O: ByteOrder, D: Document> ValueRef<'doc> for ReadonlyValue<'doc, O, D> {
     type Config = ImmutableConfig<O, D>;
 
+    #[inline]
     fn visit<'a, R>(&'a self, match_fn: impl FnOnce(VisitRef<'a, 'doc, Self::Config>) -> R) -> R
     where
         'doc: 'a,
@@ -80,6 +81,7 @@ impl<'doc, O: ByteOrder, D: Document> ValueRef<'doc> for ReadonlyValue<'doc, O, 
         }
     }
 
+    #[inline]
     fn map<R>(self, match_fn: impl FnOnce(MapRef<'doc, Self::Config>) -> R) -> R {
         match self {
             ReadonlyValue::End(()) => match_fn(MapRef::End(())),
