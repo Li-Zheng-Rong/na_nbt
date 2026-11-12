@@ -72,8 +72,9 @@ impl<O: ByteOrder, D: Document> ConfigRef for ImmutableConfig<O, D> {
                 let mut p = params.0;
                 let mut m = params.1;
                 for _ in 0..index {
-                    p = (*m).store.end_pointer;
-                    m = m.add((*m).store.flat_next_mark as usize);
+                    let cur = *m;
+                    p = p.add(cur.byte_len as usize);
+                    m = m.add(cur.flat_next_mark as usize);
                 }
                 (p, m, params.2)
             } else {
@@ -167,25 +168,13 @@ impl<O: ByteOrder, D: Document> ConfigRef for ImmutableConfig<O, D> {
                         _doc: params.2.clone(),
                     }),
                     TagID::List => cast!(ReadonlyList {
-                        data: slice::from_raw_parts(
-                            params.0,
-                            (*params.1)
-                                .store
-                                .end_pointer
-                                .byte_offset_from_unsigned(params.0),
-                        ),
+                        data: slice::from_raw_parts(params.0, (*params.1).byte_len as usize),
                         mark: params.1.add(1),
                         doc: params.2.clone(),
                         _marker: PhantomData::<O>,
                     }),
                     TagID::Compound => cast!(ReadonlyCompound {
-                        data: slice::from_raw_parts(
-                            params.0,
-                            (*params.1)
-                                .store
-                                .end_pointer
-                                .byte_offset_from_unsigned(params.0),
-                        ),
+                        data: slice::from_raw_parts(params.0, (*params.1).byte_len as usize),
                         mark: params.1.add(1),
                         doc: params.2.clone(),
                         _marker: PhantomData::<O>,

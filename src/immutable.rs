@@ -5,7 +5,7 @@ mod document;
 mod list;
 mod mark;
 mod read;
-mod size;
+pub(crate) mod size;
 mod string;
 mod typed_list;
 mod value;
@@ -24,6 +24,7 @@ mod borrowed {
     pub type BorrowedValue<'s, O> = value::ReadonlyValue<'s, O, ()>;
 
     impl Document for () {
+        #[inline]
         fn empty() -> Self {}
     }
 
