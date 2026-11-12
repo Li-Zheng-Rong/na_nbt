@@ -3,8 +3,8 @@ use std::{marker::PhantomData, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigMut, ConfigRef, GenericNBT, ListMut, ListRef, MUTF8Str, VecMut, NBT, NBTBase,
-    ListOwn, ValueOwn, TagID, cold_path,
+    ByteOrder, ConfigMut, ConfigRef, GenericNBT, ListMut, ListOwn, ListRef, MUTF8Str, NBT, NBTBase,
+    TagID, ValueOwn, VecMut, cold_path,
     mutable::{
         compound_mut::{MutCompound, MutCompoundIter},
         compound_ref::{RefCompound, RefCompoundIter},
@@ -63,6 +63,7 @@ impl<O: ByteOrder> ConfigRef for MutableConfig<O> {
 
     type ReadParams<'a> = *const u8;
 
+    #[inline]
     unsafe fn list_get<'a, 'doc, T: GenericNBT>(
         params: Self::ReadParams<'a>,
         index: usize,
@@ -73,6 +74,7 @@ impl<O: ByteOrder> ConfigRef for MutableConfig<O> {
         unsafe { params.add(index * mutable_tag_size(T::TAG_ID)) }
     }
 
+    #[inline]
     unsafe fn compound_get<'a, 'doc>(
         params: Self::ReadParams<'a>,
         key: &MUTF8Str,
@@ -80,33 +82,35 @@ impl<O: ByteOrder> ConfigRef for MutableConfig<O> {
     where
         'doc: 'a,
     {
+        let key_bytes = key.as_bytes();
+        let key_len = key_bytes.len();
+        if key_len > u16::MAX as usize {
+            cold_path();
+            return None;
+        }
+        let key_len_raw = byteorder::U16::<O>::new(key_len as u16).to_bytes();
+
         unsafe {
-            let key_bytes = key.as_bytes();
             let mut ptr = params;
             loop {
-                let tag_id = *ptr.cast();
-                ptr = ptr.add(1);
-
+                let tag_id = *ptr.cast::<TagID>();
                 if tag_id == TagID::End {
-                    cold_path();
                     return None;
                 }
 
-                let name_len = byteorder::U16::<O>::from_bytes(*ptr.cast()).get();
-                ptr = ptr.add(2);
-
-                let name_bytes = slice::from_raw_parts(ptr, name_len as usize);
-                ptr = ptr.add(name_len as usize);
-
-                if key_bytes == name_bytes {
-                    return Some((tag_id, ptr));
+                let raw_len = *ptr.add(1).cast::<[u8; 2]>();
+                if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes
+                {
+                    return Some((tag_id, ptr.add(3 + key_len)));
                 }
 
-                ptr = ptr.add(mutable_tag_size(tag_id));
+                let name_len = byteorder::U16::<O>::from_bytes(raw_len).get() as usize;
+                ptr = ptr.add(3 + name_len + mutable_tag_size(tag_id));
             }
         }
     }
 
+    #[inline]
     #[allow(forgetting_copy_types)]
     #[allow(forgetting_references)]
     #[allow(clippy::forget_non_drop)]
@@ -164,6 +168,7 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
 
     type WriteParams<'a> = VecMut<'a, u8>;
 
+    #[inline]
     #[allow(forgetting_references)]
     #[allow(clippy::forget_non_drop)]
     unsafe fn read_mut<'a, 'doc, T: GenericNBT>(
@@ -355,43 +360,46 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
         )
     }
 
+    #[inline]
     unsafe fn compound_remove<'a>(
         mut params: Self::WriteParams<'a>,
         key: &MUTF8Str,
     ) -> Option<ValueOwn<Self::ByteOrder>> {
+        let key_bytes = key.as_bytes();
+        let key_len = key_bytes.len();
+        if key_len > u16::MAX as usize {
+            cold_path();
+            return None;
+        }
+        let key_len_raw = byteorder::U16::<O>::new(key_len as u16).to_bytes();
+
         unsafe {
-            let key_bytes = key.as_bytes();
             let mut ptr = params.as_mut_ptr();
             loop {
-                let tag_id = *ptr.cast();
-                ptr = ptr.add(1);
-
+                let tag_id = *ptr.cast::<TagID>();
                 if tag_id == TagID::End {
-                    cold_path();
                     return None;
                 }
 
-                let name_len = byteorder::U16::<O>::from_bytes(*ptr.cast()).get();
-                ptr = ptr.add(2);
-
-                let name_bytes = slice::from_raw_parts(ptr, name_len as usize);
-                ptr = ptr.add(name_len as usize);
-
-                if key_bytes == name_bytes {
+                let raw_len = *ptr.add(1).cast::<[u8; 2]>();
+                if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes
+                {
+                    let val_ptr = ptr.add(3 + key_len);
                     let tag_size = mutable_tag_size(tag_id);
-                    let pos_bytes = ptr.byte_offset_from_unsigned(params.as_mut_ptr());
-                    let value = ValueOwn::<O>::read(tag_id, ptr);
+                    let pos_bytes = val_ptr.byte_offset_from_unsigned(params.as_mut_ptr());
+                    let value = ValueOwn::<O>::read(tag_id, val_ptr);
                     let len_bytes = params.len();
                     ptr::copy(
-                        ptr.add(tag_size),
-                        ptr.sub(name_len as usize + 2 + 1),
+                        val_ptr.add(tag_size),
+                        ptr,
                         len_bytes - pos_bytes - tag_size,
                     );
-                    params.set_len(len_bytes - (tag_size + name_len as usize + 2 + 1));
+                    params.set_len(len_bytes - (tag_size + 3 + key_len));
                     return Some(value);
                 }
 
-                ptr = ptr.add(mutable_tag_size(tag_id));
+                let name_len = byteorder::U16::<O>::from_bytes(raw_len).get() as usize;
+                ptr = ptr.add(3 + name_len + mutable_tag_size(tag_id));
             }
         }
     }

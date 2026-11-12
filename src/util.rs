@@ -29,6 +29,13 @@ fn encode_mutf8_slow(value: &str) -> Cow<'_, [u8]> {
     simd_cesu8::mutf8::encode(value)
 }
 
+#[cold]
+#[inline(never)]
+fn with_mutf8_key_slow<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R {
+    let encoded = simd_cesu8::mutf8::encode(key);
+    f(unsafe { MUTF8Str::from_mutf8_unchecked(&encoded) })
+}
+
 #[inline(always)]
 fn is_ascii_short_16(bytes: &[u8]) -> bool {
     let len = bytes.len();
@@ -126,6 +133,18 @@ pub(crate) fn encode_mutf8(value: &str) -> Cow<'_, [u8]> {
         Cow::Borrowed(bytes)
     } else {
         encode_mutf8_slow(value)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn with_mutf8_key<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R {
+    let bytes = key.as_bytes();
+    if (bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes))
+        || !simd_cesu8::mutf8::needs_encoded(key)
+    {
+        f(unsafe { MUTF8Str::from_mutf8_unchecked(bytes) })
+    } else {
+        with_mutf8_key_slow(key, f)
     }
 }
 

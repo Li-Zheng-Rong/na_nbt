@@ -14,14 +14,14 @@
 //! - [`CompoundMut`] - Mutable access to NBT compounds
 
 use crate::{
-    CompoundBase, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListBase, MUTF8Str, MapMut, NBT,
-    NBTBase, TagID, TypedListBase, ValueBase, ValueOwn, VisitMut, VisitMutShared, cold_path,
-    encode_mutf8,
+    CompoundBase, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListBase, MapMut, NBT, NBTBase, TagID,
+    TypedListBase, ValueBase, ValueOwn, VisitMut, VisitMutShared, cold_path,
     index::Index,
     tag::{
         Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
         String, TypedList,
     },
+    with_mutf8_key,
 };
 
 /// Trait for mutable access to NBT values.
@@ -780,14 +780,10 @@ pub trait CompoundMut<'s>:
     where
         's: 'a,
     {
-        unsafe {
-            let key = encode_mutf8(key);
-            let (tag_id, params) = Self::Config::compound_get(
-                self._to_read_params(),
-                MUTF8Str::from_mutf8_unchecked(&key),
-            )?;
+        with_mutf8_key(key, |key| unsafe {
+            let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             Some(Self::Config::read_value(tag_id, params))
-        }
+        })
     }
 
     #[inline]
@@ -795,18 +791,14 @@ pub trait CompoundMut<'s>:
     where
         's: 'a,
     {
-        unsafe {
-            let key = encode_mutf8(key);
-            let (tag_id, params) = Self::Config::compound_get(
-                self._to_read_params(),
-                MUTF8Str::from_mutf8_unchecked(&key),
-            )?;
+        with_mutf8_key(key, |key| unsafe {
+            let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             if tag_id != T::TAG_ID {
                 cold_path();
                 return None;
             }
             Self::Config::read::<T>(params)
-        }
+        })
     }
 
     #[inline]
@@ -814,14 +806,10 @@ pub trait CompoundMut<'s>:
     where
         's: 'a,
     {
-        unsafe {
-            let key = encode_mutf8(key);
-            let (tag_id, params) = Self::Config::compound_get(
-                self._to_read_params(),
-                MUTF8Str::from_mutf8_unchecked(&key),
-            )?;
+        with_mutf8_key(key, |key| unsafe {
+            let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             Some(Self::Config::read_value_mut(tag_id, params))
-        }
+        })
     }
 
     #[inline]
@@ -829,18 +817,14 @@ pub trait CompoundMut<'s>:
     where
         's: 'a,
     {
-        unsafe {
-            let key = encode_mutf8(key);
-            let (tag_id, params) = Self::Config::compound_get(
-                self._to_read_params(),
-                MUTF8Str::from_mutf8_unchecked(&key),
-            )?;
+        with_mutf8_key(key, |key| unsafe {
+            let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             if tag_id != T::TAG_ID {
                 cold_path();
                 return None;
             }
             Self::Config::read_mut::<T>(params)
-        }
+        })
     }
 
     #[inline]
@@ -849,22 +833,18 @@ pub trait CompoundMut<'s>:
         key: &str,
         value: impl IntoNBT<<Self::Config as ConfigRef>::ByteOrder, Tag = T>,
     ) -> Option<ValueOwn<<Self::Config as ConfigRef>::ByteOrder>> {
-        unsafe {
-            let key = encode_mutf8(key);
-            let key = MUTF8Str::from_mutf8_unchecked(&key);
+        with_mutf8_key(key, |key| unsafe {
             let old = Self::Config::compound_remove(self._to_write_params(), key);
             Self::Config::compound_insert::<T>(self._to_write_params(), key, value.into_nbt());
             old
-        }
+        })
     }
 
     #[inline]
     fn remove(&mut self, key: &str) -> Option<ValueOwn<<Self::Config as ConfigRef>::ByteOrder>> {
-        unsafe {
-            let key = encode_mutf8(key);
-            let key = MUTF8Str::from_mutf8_unchecked(&key);
+        with_mutf8_key(key, |key| unsafe {
             Self::Config::compound_remove(self._to_write_params(), key)
-        }
+        })
     }
 
     fn iter<'a>(&'a self) -> <Self::Config as ConfigRef>::CompoundIter<'a>

@@ -14,13 +14,14 @@
 //! - [`CompoundRef`] - Read-only access to NBT compounds
 
 use crate::{
-    CompoundBase, ConfigRef, GenericNBT, ListBase, MUTF8Str, MapRef, NBT, NBTBase, TagID,
-    TypedListBase, ValueBase, VisitRef, cold_path, encode_mutf8,
+    CompoundBase, ConfigRef, GenericNBT, ListBase, MapRef, NBT, NBTBase, TagID, TypedListBase,
+    ValueBase, VisitRef, cold_path,
     index::Index,
     tag::{
         Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
         String, TypedList,
     },
+    with_mutf8_key,
 };
 
 /// Trait for read-only access to NBT values.
@@ -321,26 +322,22 @@ pub trait CompoundRef<'s>:
 
     #[inline]
     fn get(&self, key: &str) -> Option<<Self::Config as ConfigRef>::Value<'s>> {
-        unsafe {
-            let key = encode_mutf8(key);
-            let key = MUTF8Str::from_mutf8_unchecked(&key);
+        with_mutf8_key(key, |key| unsafe {
             let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             Some(Self::Config::read_value(tag_id, params))
-        }
+        })
     }
 
     #[inline]
     fn get_<T: GenericNBT>(&self, key: &str) -> Option<T::TypeRef<'s, Self::Config>> {
-        unsafe {
-            let key = encode_mutf8(key);
-            let key = MUTF8Str::from_mutf8_unchecked(&key);
+        with_mutf8_key(key, |key| unsafe {
             let (tag_id, params) = Self::Config::compound_get(self._to_read_params(), key)?;
             if tag_id != T::TAG_ID {
                 cold_path();
                 return None;
             }
             Self::Config::read::<T>(params)
-        }
+        })
     }
 
     fn iter(&self) -> <Self::Config as ConfigRef>::CompoundIter<'s>;

@@ -37,6 +37,7 @@ impl<O: ByteOrder, D: Document> ConfigRef for ImmutableConfig<O, D> {
 
     type ReadParams<'a> = (*const u8, *const Mark, &'a D);
 
+    #[inline]
     unsafe fn list_get<'a, 'doc, T: GenericNBT>(
         params: Self::ReadParams<'a>,
         index: usize,
@@ -89,6 +90,7 @@ impl<O: ByteOrder, D: Document> ConfigRef for ImmutableConfig<O, D> {
         }
     }
 
+    #[inline]
     unsafe fn compound_get<'a, 'doc>(
         params: Self::ReadParams<'a>,
         key: &MUTF8Str,
@@ -96,36 +98,39 @@ impl<O: ByteOrder, D: Document> ConfigRef for ImmutableConfig<O, D> {
     where
         'doc: 'a,
     {
+        let key_bytes = key.as_bytes();
+        let key_len = key_bytes.len();
+        if key_len > u16::MAX as usize {
+            cold_path();
+            return None;
+        }
+        let key_len_raw = byteorder::U16::<O>::new(key_len as u16).to_bytes();
+
         unsafe {
-            let key_bytes = key.as_bytes();
             let mut ptr = params.0;
             let mut mark = params.1;
             loop {
-                let tag_id = *ptr.cast();
-                ptr = ptr.add(1);
-
+                let tag_id = *ptr.cast::<TagID>();
                 if tag_id == TagID::End {
-                    cold_path();
                     return None;
                 }
 
-                let name_len = byteorder::U16::<O>::from_bytes(*ptr.cast()).get();
-                ptr = ptr.add(2);
-
-                let name_bytes = core::slice::from_raw_parts(ptr, name_len as usize);
-                ptr = ptr.add(name_len as usize);
-
-                if key_bytes == name_bytes {
-                    return Some((tag_id, (ptr, mark, params.2)));
+                let raw_len = *ptr.add(1).cast::<[u8; 2]>();
+                if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes
+                {
+                    return Some((tag_id, (ptr.add(3 + key_len), mark, params.2)));
                 }
 
-                let (data_advance, mark_advance) = immutable_tag_size::<O>(tag_id, ptr, mark);
-                ptr = ptr.add(data_advance);
+                let name_len = byteorder::U16::<O>::from_bytes(raw_len).get() as usize;
+                let val_ptr = ptr.add(3 + name_len);
+                let (data_advance, mark_advance) = immutable_tag_size::<O>(tag_id, val_ptr, mark);
+                ptr = val_ptr.add(data_advance);
                 mark = mark.add(mark_advance);
             }
         }
     }
 
+    #[inline]
     #[allow(forgetting_copy_types)]
     unsafe fn read<'a, 'doc, T: GenericNBT>(
         params: Self::ReadParams<'a>,
