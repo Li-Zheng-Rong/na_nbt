@@ -1,12 +1,11 @@
-use std::{marker::PhantomData, ptr};
-
-use zerocopy::byteorder;
+use std::marker::PhantomData;
 
 use crate::{
-    ByteOrder, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListOwn, NBT, StringOwn, TagID, ValueOwn,
+    ByteOrder, CompoundMut, CompoundRef, ConfigMut, ConfigRef, GenericNBT, IntoNBT, NBT, ValueOwn,
     VecOwn, cold_path,
     mutable::{
-        config::MutableConfig, size::mutable_tag_size, value_mut::MutValue, value_ref::RefValue,
+        compound_mut::MutCompound, compound_ref::RefCompound, config::MutableConfig,
+        size::drop_compound_entries, value_mut::MutValue, value_ref::RefValue,
     },
     with_mutf8_key,
 };
@@ -28,21 +27,24 @@ impl<O: ByteOrder> Default for CompoundOwn<O> {
 
 impl<O: ByteOrder> CompoundOwn<O> {
     #[inline]
-    fn _to_read_params<'a>(&'a self) -> <MutableConfig<O> as ConfigRef>::ReadParams<'a> {
-        self.data.as_ptr()
+    pub(crate) fn as_ref(&self) -> RefCompound<'_, O> {
+        RefCompound {
+            data: self.data.as_ptr(),
+            _marker: PhantomData,
+        }
     }
 
     #[inline]
-    fn _to_write_params<'a>(&'a mut self) -> <MutableConfig<O> as ConfigMut>::WriteParams<'a> {
-        self.data.to_mut()
+    pub(crate) fn as_mut(&mut self) -> MutCompound<'_, O> {
+        MutCompound {
+            data: self.data.to_mut(),
+            _marker: PhantomData,
+        }
     }
 
     #[inline]
     pub fn get<'a>(&'a self, key: &str) -> Option<RefValue<'a, O>> {
-        with_mutf8_key(key, |key| unsafe {
-            let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
-            Some(MutableConfig::<O>::read_value(tag_id, params))
-        })
+        self.as_ref().get(key)
     }
 
     #[inline]
@@ -50,20 +52,13 @@ impl<O: ByteOrder> CompoundOwn<O> {
         &'a self,
         key: &str,
     ) -> Option<T::TypeRef<'a, MutableConfig<O>>> {
-        with_mutf8_key(key, |key| unsafe {
-            let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
-            if tag_id != T::TAG_ID {
-                cold_path();
-                return None;
-            }
-            MutableConfig::<O>::read::<T>(params)
-        })
+        self.as_ref().get_::<T>(key)
     }
 
     #[inline]
     pub fn get_mut<'a>(&'a mut self, key: &str) -> Option<MutValue<'a, O>> {
         with_mutf8_key(key, |key| unsafe {
-            let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
+            let (tag_id, params) = MutableConfig::<O>::compound_get(self.data.as_ptr(), key)?;
             Some(MutableConfig::<O>::read_value_mut(tag_id, params))
         })
     }
@@ -74,7 +69,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
         key: &str,
     ) -> Option<T::TypeMut<'a, MutableConfig<O>>> {
         with_mutf8_key(key, |key| unsafe {
-            let (tag_id, params) = MutableConfig::<O>::compound_get(self._to_read_params(), key)?;
+            let (tag_id, params) = MutableConfig::<O>::compound_get(self.data.as_ptr(), key)?;
             if tag_id != T::TAG_ID {
                 cold_path();
                 return None;
@@ -89,70 +84,20 @@ impl<O: ByteOrder> CompoundOwn<O> {
         key: &str,
         value: impl IntoNBT<O, Tag = T>,
     ) -> Option<ValueOwn<O>> {
-        with_mutf8_key(key, |key| unsafe {
-            let old = MutableConfig::<O>::compound_remove(self._to_write_params(), key);
-            MutableConfig::<O>::compound_insert::<T>(
-                self._to_write_params(),
-                key,
-                value.into_nbt(),
-            );
-            old
-        })
+        self.as_mut().insert(key, value)
     }
 
     #[inline]
     pub fn remove(&mut self, key: &str) -> Option<ValueOwn<O>> {
-        with_mutf8_key(key, |key| unsafe {
-            MutableConfig::<O>::compound_remove(self._to_write_params(), key)
-        })
+        self.as_mut().remove(key)
     }
 }
 
 impl<O: ByteOrder> Drop for CompoundOwn<O> {
     fn drop(&mut self) {
         unsafe {
-            let mut ptr = self.data.as_mut_ptr();
-
-            loop {
-                let tag_id = *ptr.cast();
-                ptr = ptr.add(1);
-
-                if tag_id == TagID::End {
-                    debug_assert!(
-                        ptr.byte_offset_from_unsigned(self.data.as_mut_ptr()) == self.data.len()
-                    );
-                    return;
-                }
-
-                let name_len = byteorder::U16::<O>::from_bytes(*ptr.cast()).get();
-                ptr = ptr.add(2);
-
-                ptr = ptr.add(name_len as usize);
-
-                match tag_id {
-                    TagID::ByteArray => {
-                        ptr::read(ptr.cast::<VecOwn<i8>>());
-                    }
-                    TagID::String => {
-                        ptr::read(ptr.cast::<StringOwn>());
-                    }
-                    TagID::List => {
-                        ptr::read(ptr.cast::<ListOwn<O>>());
-                    }
-                    TagID::Compound => {
-                        ptr::read(ptr.cast::<CompoundOwn<O>>());
-                    }
-                    TagID::IntArray => {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I32<O>>>());
-                    }
-                    TagID::LongArray => {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I64<O>>>());
-                    }
-                    _ => (),
-                }
-
-                ptr = ptr.add(mutable_tag_size(tag_id));
-            }
+            let ptr = self.data.as_mut_ptr();
+            drop_compound_entries::<O>(ptr, ptr.add(self.data.len()));
         }
     }
 }

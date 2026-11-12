@@ -10,7 +10,7 @@ use zerocopy::byteorder;
 use crate::{
     ByteOrder, CompoundOwn, Error, ListOwn, Result, StringOwn, TagID, ValueOwn, VecOwn, cold_path,
     immutable::size::tag_elem_size,
-    mutable::size::{SIZE_DYN, mutable_tag_size},
+    mutable::size::{SIZE_DYN, drop_compound_entries, drop_list_elements},
 };
 
 struct CompoundBuildGuard<O: ByteOrder> {
@@ -82,34 +82,9 @@ impl<O: ByteOrder> Drop for CompoundBuildGuard<O> {
     #[cold]
     fn drop(&mut self) {
         unsafe {
-            let mut ptr = self.data.as_mut_ptr();
-            let end = ptr.add(self.data.len());
-            while ptr < end {
-                let tag_id = TagID::from_u8_unchecked(*ptr);
-                let name_len = byteorder::U16::<O>::from_bytes(*ptr.add(1).cast()).get() as usize;
-                ptr = ptr.add(3 + name_len);
-                match tag_id {
-                    TagID::ByteArray => drop(ptr::read(ptr.cast::<VecOwn<i8>>())),
-                    TagID::String => drop(ptr::read(ptr.cast::<StringOwn>())),
-                    TagID::List => drop(ptr::read(ptr.cast::<ListOwn<O>>())),
-                    TagID::Compound => drop(ptr::read(ptr.cast::<CompoundOwn<O>>())),
-                    TagID::IntArray => drop(ptr::read(ptr.cast::<VecOwn<byteorder::I32<O>>>())),
-                    TagID::LongArray => drop(ptr::read(ptr.cast::<VecOwn<byteorder::I64<O>>>())),
-                    _ => {}
-                }
-                ptr = ptr.add(mutable_tag_size(tag_id));
-            }
+            let ptr = self.data.as_mut_ptr();
+            drop_compound_entries::<O>(ptr, ptr.add(self.data.len()));
             ManuallyDrop::drop(&mut self.data);
-        }
-    }
-}
-
-#[inline(always)]
-unsafe fn drop_dyn_slice<T>(mut ptr: *mut u8, count: usize) {
-    for _ in 0..count {
-        unsafe {
-            drop(ptr::read(ptr.cast::<T>()));
-            ptr = ptr.add(SIZE_DYN);
         }
     }
 }
@@ -146,16 +121,11 @@ impl<O: ByteOrder> Drop for ListBuildGuard<O> {
         let count = self.data.len().saturating_sub(5) / SIZE_DYN;
         if count > 0 {
             unsafe {
-                let ptr = self.data.as_mut_ptr().add(5);
-                match self.tag_id {
-                    7 => drop_dyn_slice::<VecOwn<i8>>(ptr, count),
-                    8 => drop_dyn_slice::<StringOwn>(ptr, count),
-                    9 => drop_dyn_slice::<ListOwn<O>>(ptr, count),
-                    10 => drop_dyn_slice::<CompoundOwn<O>>(ptr, count),
-                    11 => drop_dyn_slice::<VecOwn<byteorder::I32<O>>>(ptr, count),
-                    12 => drop_dyn_slice::<VecOwn<byteorder::I64<O>>>(ptr, count),
-                    _ => {}
-                }
+                drop_list_elements::<O>(
+                    TagID::from_u8_unchecked(self.tag_id),
+                    self.data.as_mut_ptr().add(5),
+                    count,
+                );
             }
         }
         unsafe { ManuallyDrop::drop(&mut self.data) };

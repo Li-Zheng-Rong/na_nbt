@@ -3,12 +3,11 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ptr};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, GenericNBT, NBT, CompoundOwn, ListOwn, StringOwn, TypedListOwn, VecOwn, TagID,
+    ByteOrder, CompoundOwn, GenericNBT, ListOwn, NBT, StringOwn, TagID, TypedListOwn, ValueRef,
+    VecOwn,
     index::Index,
     mutable::{
-        compound_mut::MutCompound, compound_ref::RefCompound, config::MutableConfig,
-        list_mut::MutList, list_ref::RefList, string_ref::RefString, value_mut::MutValue,
-        value_ref::RefValue,
+        config::MutableConfig, string_ref::RefString, value_mut::MutValue, value_ref::RefValue,
     },
 };
 
@@ -56,9 +55,7 @@ impl<O: ByteOrder> ValueOwn<O> {
             }
         }
     }
-}
 
-impl<O: ByteOrder> ValueOwn<O> {
     #[inline]
     pub fn tag_id(&self) -> TagID {
         match self {
@@ -85,17 +82,7 @@ impl<O: ByteOrder> ValueOwn<O> {
 
     #[inline]
     pub fn get<'a>(&'a self, index: impl Index) -> Option<RefValue<'a, O>> {
-        index.index_dispatch(
-            self,
-            |value, index| match value {
-                ValueOwn::List(value) => value.get(index),
-                _ => None,
-            },
-            |value, key| match value {
-                ValueOwn::Compound(value) => value.get(key),
-                _ => None,
-            },
-        )
+        self.to_ref().get(index)
     }
 
     #[inline]
@@ -103,17 +90,7 @@ impl<O: ByteOrder> ValueOwn<O> {
         &'a self,
         index: impl Index,
     ) -> Option<T::TypeRef<'a, MutableConfig<O>>> {
-        index.index_dispatch(
-            self,
-            |value, index| match value {
-                ValueOwn::List(value) => value.get_::<T>(index),
-                _ => None,
-            },
-            |value, key| match value {
-                ValueOwn::Compound(value) => value.get_::<T>(key),
-                _ => None,
-            },
-        )
+        self.to_ref().get_::<T>(index)
     }
 
     #[inline]
@@ -164,14 +141,8 @@ impl<O: ByteOrder> ValueOwn<O> {
             ValueOwn::String(value) => RefValue::String(RefString {
                 data: value.as_mutf8_str(),
             }),
-            ValueOwn::List(value) => RefValue::List(RefList {
-                data: value.data.as_ptr(),
-                _marker: PhantomData,
-            }),
-            ValueOwn::Compound(value) => RefValue::Compound(RefCompound {
-                data: value.data.as_ptr(),
-                _marker: PhantomData,
-            }),
+            ValueOwn::List(value) => RefValue::List(value.as_ref()),
+            ValueOwn::Compound(value) => RefValue::Compound(value.as_ref()),
             ValueOwn::IntArray(value) => RefValue::IntArray(value),
             ValueOwn::LongArray(value) => RefValue::LongArray(value),
         }
@@ -180,119 +151,51 @@ impl<O: ByteOrder> ValueOwn<O> {
     #[inline]
     pub fn to_mut<'a>(&'a mut self) -> MutValue<'a, O> {
         match self {
-            ValueOwn::End(value) => MutValue::End(&mut *value),
-            ValueOwn::Byte(value) => MutValue::Byte(&mut *value),
-            ValueOwn::Short(value) => MutValue::Short(&mut *value),
-            ValueOwn::Int(value) => MutValue::Int(&mut *value),
-            ValueOwn::Long(value) => MutValue::Long(&mut *value),
-            ValueOwn::Float(value) => MutValue::Float(&mut *value),
-            ValueOwn::Double(value) => MutValue::Double(&mut *value),
+            ValueOwn::End(value) => MutValue::End(value),
+            ValueOwn::Byte(value) => MutValue::Byte(value),
+            ValueOwn::Short(value) => MutValue::Short(value),
+            ValueOwn::Int(value) => MutValue::Int(value),
+            ValueOwn::Long(value) => MutValue::Long(value),
+            ValueOwn::Float(value) => MutValue::Float(value),
+            ValueOwn::Double(value) => MutValue::Double(value),
             ValueOwn::ByteArray(value) => MutValue::ByteArray(value.to_mut()),
             ValueOwn::String(value) => MutValue::String(value.to_mut()),
-            ValueOwn::List(value) => MutValue::List(MutList {
-                data: value.data.to_mut(),
-                _marker: PhantomData,
-            }),
-            ValueOwn::Compound(value) => MutValue::Compound(MutCompound {
-                data: value.data.to_mut(),
-                _marker: PhantomData,
-            }),
+            ValueOwn::List(value) => MutValue::List(value.as_mut()),
+            ValueOwn::Compound(value) => MutValue::Compound(value.as_mut()),
             ValueOwn::IntArray(value) => MutValue::IntArray(value.to_mut()),
             ValueOwn::LongArray(value) => MutValue::LongArray(value.to_mut()),
         }
     }
 }
 
-impl<O: ByteOrder> From<()> for ValueOwn<O> {
-    #[inline]
-    fn from(value: ()) -> Self {
-        ValueOwn::End(value)
-    }
+macro_rules! impl_from_for_value_own {
+    ($($variant:ident($ty:ty)),* $(,)?) => {
+        $(
+            impl<O: ByteOrder> From<$ty> for ValueOwn<O> {
+                #[inline]
+                fn from(value: $ty) -> Self {
+                    ValueOwn::$variant(value)
+                }
+            }
+        )*
+    };
 }
 
-impl<O: ByteOrder> From<i8> for ValueOwn<O> {
-    #[inline]
-    fn from(value: i8) -> Self {
-        ValueOwn::Byte(value)
-    }
-}
-
-impl<O: ByteOrder> From<byteorder::I16<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: byteorder::I16<O>) -> Self {
-        ValueOwn::Short(value)
-    }
-}
-
-impl<O: ByteOrder> From<byteorder::I32<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: byteorder::I32<O>) -> Self {
-        ValueOwn::Int(value)
-    }
-}
-
-impl<O: ByteOrder> From<byteorder::I64<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: byteorder::I64<O>) -> Self {
-        ValueOwn::Long(value)
-    }
-}
-
-impl<O: ByteOrder> From<byteorder::F32<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: byteorder::F32<O>) -> Self {
-        ValueOwn::Float(value)
-    }
-}
-
-impl<O: ByteOrder> From<byteorder::F64<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: byteorder::F64<O>) -> Self {
-        ValueOwn::Double(value)
-    }
-}
-
-impl<O: ByteOrder> From<VecOwn<i8>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: VecOwn<i8>) -> Self {
-        ValueOwn::ByteArray(value)
-    }
-}
-
-impl<O: ByteOrder> From<StringOwn> for ValueOwn<O> {
-    #[inline]
-    fn from(value: StringOwn) -> Self {
-        ValueOwn::String(value)
-    }
-}
-
-impl<O: ByteOrder> From<ListOwn<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: ListOwn<O>) -> Self {
-        ValueOwn::List(value)
-    }
-}
-
-impl<O: ByteOrder> From<CompoundOwn<O>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: CompoundOwn<O>) -> Self {
-        ValueOwn::Compound(value)
-    }
-}
-
-impl<O: ByteOrder> From<VecOwn<byteorder::I32<O>>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: VecOwn<byteorder::I32<O>>) -> Self {
-        ValueOwn::IntArray(value)
-    }
-}
-
-impl<O: ByteOrder> From<VecOwn<byteorder::I64<O>>> for ValueOwn<O> {
-    #[inline]
-    fn from(value: VecOwn<byteorder::I64<O>>) -> Self {
-        ValueOwn::LongArray(value)
-    }
-}
+impl_from_for_value_own!(
+    End(()),
+    Byte(i8),
+    Short(byteorder::I16<O>),
+    Int(byteorder::I32<O>),
+    Long(byteorder::I64<O>),
+    Float(byteorder::F32<O>),
+    Double(byteorder::F64<O>),
+    ByteArray(VecOwn<i8>),
+    String(StringOwn),
+    List(ListOwn<O>),
+    Compound(CompoundOwn<O>),
+    IntArray(VecOwn<byteorder::I32<O>>),
+    LongArray(VecOwn<byteorder::I64<O>>),
+);
 
 impl<O: ByteOrder, T: NBT> From<TypedListOwn<O, T>> for ValueOwn<O> {
     #[inline]

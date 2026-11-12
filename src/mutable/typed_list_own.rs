@@ -1,11 +1,14 @@
-use std::{hint::unreachable_unchecked, marker::PhantomData, ptr};
-
-use zerocopy::byteorder;
+use std::marker::PhantomData;
 
 use crate::{
-    ByteOrder, CompoundOwn, ConfigMut, ConfigRef, IntoNBT, ListOwn, NBT, StringOwn, TagID, VecOwn,
-    cold_path,
-    mutable::{config::MutableConfig, size::mutable_tag_size},
+    ByteOrder, ConfigMut, ConfigRef, IntoNBT, NBT, TypedListBase, TypedListMut, TypedListRef,
+    VecOwn, cold_path,
+    mutable::{
+        config::MutableConfig,
+        size::{SIZE_DYN, drop_list_elements},
+        typed_list_mut::MutTypedList,
+        typed_list_ref::RefTypedList,
+    },
 };
 
 #[repr(transparent)]
@@ -25,6 +28,22 @@ impl<O: ByteOrder, T: NBT> Default for TypedListOwn<O, T> {
 
 impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
     #[inline]
+    pub(crate) fn as_ref(&self) -> RefTypedList<'_, O, T> {
+        RefTypedList {
+            data: self.data.as_ptr(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_mut(&mut self) -> MutTypedList<'_, O, T> {
+        MutTypedList {
+            data: self.data.to_mut(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
     fn _to_read_params<'a>(&'a self) -> <MutableConfig<O> as ConfigRef>::ReadParams<'a> {
         unsafe { self.data.as_ptr().add(1 + 4) }
     }
@@ -36,28 +55,17 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        unsafe { byteorder::U32::<O>::from_bytes(*self.data.as_ptr().add(1).cast()).get() as usize }
+        self.as_ref().len()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.as_ref().is_empty()
     }
 
     #[inline]
     pub fn get<'a>(&'a self, index: usize) -> Option<T::TypeRef<'a, MutableConfig<O>>> {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        unsafe {
-            MutableConfig::<O>::read::<T>(MutableConfig::<O>::list_get(
-                T::TAG_ID,
-                self._to_read_params(),
-                index,
-            ))
-        }
+        self.as_ref().get(index)
     }
 
     #[inline]
@@ -78,108 +86,34 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
 
     #[inline]
     pub fn push(&mut self, value: impl IntoNBT<O, Tag = T>) {
-        unsafe { MutableConfig::<O>::list_push::<T>(self._to_write_params(), value.into_nbt()) }
+        self.as_mut().push(value);
     }
 
     #[inline]
     pub fn pop(&mut self) -> Option<T::Type<O>> {
-        if self.is_empty() {
-            cold_path();
-            return None;
-        }
-
-        unsafe {
-            T::own_into_(MutableConfig::<O>::list_pop_value(
-                T::TAG_ID,
-                self._to_write_params(),
-            ))
-        }
+        self.as_mut().pop()
     }
 
     #[inline]
     pub fn insert(&mut self, index: usize, value: impl IntoNBT<O, Tag = T>) {
-        if index > self.len() {
-            cold_path();
-            return;
-        }
-
-        unsafe {
-            MutableConfig::<O>::list_insert::<T>(self._to_write_params(), index, value.into_nbt())
-        }
+        self.as_mut().insert(index, value);
     }
 
     #[inline]
     pub fn remove(&mut self, index: usize) -> Option<T::Type<O>> {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        unsafe {
-            T::own_into_(MutableConfig::<O>::list_remove_value(
-                T::TAG_ID,
-                self._to_write_params(),
-                index,
-            ))
-        }
+        self.as_mut().remove(index)
     }
 }
 
 impl<O: ByteOrder, T: NBT> Drop for TypedListOwn<O, T> {
     fn drop(&mut self) {
+        if T::TAG_ID.is_primitive() {
+            return;
+        }
+        let len = self.len();
         unsafe {
-            let mut ptr = self.data.as_mut_ptr();
-
-            let tag_id = T::TAG_ID;
-            ptr = ptr.add(1);
-
-            if tag_id.is_primitive() {
-                return;
-            }
-
-            let len = byteorder::U32::<O>::from_bytes(*ptr.cast()).get();
-            ptr = ptr.add(4);
-
-            match tag_id {
-                TagID::ByteArray => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<VecOwn<i8>>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                TagID::String => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<StringOwn>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                TagID::List => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<ListOwn<O>>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                TagID::Compound => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<CompoundOwn<O>>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                TagID::IntArray => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I32<O>>>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                TagID::LongArray => {
-                    for _ in 0..len {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I64<O>>>());
-                        ptr = ptr.add(mutable_tag_size(tag_id));
-                    }
-                }
-                _ => unreachable_unchecked(),
-            }
-            debug_assert!(ptr.byte_offset_from_unsigned(self.data.as_mut_ptr()) == self.data.len());
+            debug_assert_eq!(1 + 4 + len * SIZE_DYN, self.data.len());
+            drop_list_elements::<O>(T::TAG_ID, self.data.as_mut_ptr().add(5), len);
         }
     }
 }

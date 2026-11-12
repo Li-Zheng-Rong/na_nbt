@@ -11,13 +11,32 @@ mod typed_list;
 mod value;
 mod write;
 
-mod borrowed {
-    use zerocopy::byteorder;
+use zerocopy::byteorder;
 
-    use crate::{
-        ByteOrder, ConfigRef, Result, TagID, cold_path,
-        immutable::{config::ImmutableConfig, document::Document},
-    };
+use crate::{ByteOrder, ConfigRef, TagID, cold_path};
+
+#[inline]
+unsafe fn read_root<'s, O: ByteOrder, D: document::Document>(
+    source: *const u8,
+    mark: *const mark::Mark,
+    doc: &D,
+) -> value::ReadonlyValue<'s, O, D> {
+    unsafe {
+        let root_tag = *source.cast::<TagID>();
+        if root_tag == TagID::End {
+            cold_path();
+            return value::ReadonlyValue::End(());
+        }
+        let name_len = byteorder::U16::<O>::from_bytes(*source.add(1).cast()).get() as usize;
+        <config::ImmutableConfig<O, D> as ConfigRef>::read_value(
+            root_tag,
+            (source.add(3 + name_len), mark, doc),
+        )
+    }
+}
+
+mod borrowed {
+    use crate::{ByteOrder, Result, immutable::document::Document};
 
     use super::*;
 
@@ -47,26 +66,7 @@ mod borrowed {
     impl<'s, O: ByteOrder> BorrowedDocument<'s, O> {
         #[inline]
         pub fn root<'doc>(&'doc self) -> BorrowedValue<'doc, O> {
-            let root_tag = unsafe { *self.source.cast() };
-
-            if root_tag == TagID::End {
-                cold_path();
-                return BorrowedValue::End(());
-            }
-
-            let name_len =
-                byteorder::U16::<O>::from_bytes(unsafe { *self.source.add(1).cast() }).get();
-
-            unsafe {
-                <ImmutableConfig<O, ()> as ConfigRef>::read_value(
-                    root_tag,
-                    (
-                        self.source.add(3 + name_len as usize),
-                        self.mark.as_ptr(),
-                        &(),
-                    ),
-                )
-            }
+            unsafe { read_root(self.source, self.mark.as_ptr(), &()) }
         }
     }
 
@@ -81,12 +81,8 @@ mod shared {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use zerocopy::byteorder;
 
-    use crate::{
-        ByteOrder, ConfigRef, Result, TagID, cold_path,
-        immutable::{config::ImmutableConfig, document::Document},
-    };
+    use crate::{ByteOrder, Result, immutable::document::Document};
 
     use super::*;
 
@@ -123,27 +119,7 @@ mod shared {
         /// Returns the root value of the document.
         #[inline]
         pub fn root<O: ByteOrder>(self: Arc<Self>) -> SharedValue<O> {
-            let root_tag = unsafe { TagID::from_u8_unchecked(*self.source.get_unchecked(0)) };
-
-            if root_tag == TagID::End {
-                cold_path();
-                return SharedValue::End(());
-            }
-
-            let name_len =
-                byteorder::U16::<O>::from_bytes(unsafe { *self.source.as_ptr().add(1).cast() })
-                    .get();
-
-            unsafe {
-                <ImmutableConfig<O, Arc<SharedDocument>> as ConfigRef>::read_value(
-                    root_tag,
-                    (
-                        self.source.as_ptr().add(3 + name_len as usize),
-                        self.mark.as_ptr(),
-                        &self,
-                    ),
-                )
-            }
+            unsafe { read_root(self.source.as_ptr(), self.mark.as_ptr(), &self) }
         }
     }
 }
