@@ -12,8 +12,8 @@
 use std::io::Write;
 
 use crate::{
-    ByteOrder, ListMut, ListRef, MapMut, MapRef, NBT, NBTBase, Result, TagID, ValueMut, ValueRef,
-    VisitMut, VisitMutShared, VisitRef,
+    ByteOrder, ConfigRef, ListMut, ListRef, MapMut, MapRef, NBT, NBTBase, Result, TagID, ValueMut,
+    ValueOwn, ValueRef, VisitMut, VisitMutShared, VisitRef,
     tag::{
         Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
         String, TypedList,
@@ -95,6 +95,16 @@ pub trait NBTInto: NBTBase {
     fn ref_into_<'s, V: ValueRef<'s>>(value: V) -> Option<Self::TypeRef<'s, V::Config>>;
 
     fn mut_into_<'s, V: ValueMut<'s>>(value: V) -> Option<Self::TypeMut<'s, V::Config>>;
+
+    fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>>;
+
+    #[inline]
+    unsafe fn can_take_list_elem<'a, C: ConfigRef>(
+        _params: C::ReadParams<'a>,
+        _index: usize,
+    ) -> bool {
+        true
+    }
 }
 
 pub trait NBTRef: NBTBase {
@@ -127,6 +137,14 @@ macro_rules! impl_value_ref_dispatch {
                         MapMut::$t(v) => Some(v),
                         _ => None,
                     })
+                }
+
+                #[inline]
+                fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>> {
+                    match value {
+                        ValueOwn::$t(v) => Some(v),
+                        _ => None,
+                    }
                 }
             }
 
@@ -179,5 +197,24 @@ impl<T: NBT> NBTInto for TypedList<T> {
             MapMut::List(v) => v.typed_::<T>(),
             _ => None,
         })
+    }
+
+    #[inline]
+    fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>> {
+        match value {
+            ValueOwn::List(v) => v.typed_::<T>(),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    unsafe fn can_take_list_elem<'a, C: ConfigRef>(
+        params: C::ReadParams<'a>,
+        index: usize,
+    ) -> bool {
+        unsafe {
+            let elem_params = C::list_get(TagID::List, params, index);
+            C::read::<List>(elem_params).is_some_and(|list| list.element_is_::<T>())
+        }
     }
 }

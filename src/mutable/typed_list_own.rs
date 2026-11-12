@@ -3,7 +3,7 @@ use std::{hint::unreachable_unchecked, marker::PhantomData, ptr};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundOwn, ConfigMut, ConfigRef, IntoNBT, ListOwn, NBT, StringOwn, VecOwn, TagID,
+    ByteOrder, CompoundOwn, ConfigMut, ConfigRef, IntoNBT, ListOwn, NBT, StringOwn, TagID, VecOwn,
     cold_path,
     mutable::{config::MutableConfig, size::mutable_tag_size},
 };
@@ -52,7 +52,8 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
         }
 
         unsafe {
-            MutableConfig::<O>::read::<T>(MutableConfig::<O>::list_get::<T>(
+            MutableConfig::<O>::read::<T>(MutableConfig::<O>::list_get(
+                T::TAG_ID,
                 self._to_read_params(),
                 index,
             ))
@@ -67,7 +68,8 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
         }
 
         unsafe {
-            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get::<T>(
+            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get(
+                T::TAG_ID,
                 self._to_read_params(),
                 index,
             ))
@@ -86,7 +88,12 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
             return None;
         }
 
-        unsafe { MutableConfig::<O>::list_pop::<T>(self._to_write_params()) }
+        unsafe {
+            T::own_into_(MutableConfig::<O>::list_pop_value(
+                T::TAG_ID,
+                self._to_write_params(),
+            ))
+        }
     }
 
     #[inline]
@@ -108,7 +115,13 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
             return None;
         }
 
-        unsafe { MutableConfig::<O>::list_remove::<T>(self._to_write_params(), index) }
+        unsafe {
+            T::own_into_(MutableConfig::<O>::list_remove_value(
+                T::TAG_ID,
+                self._to_write_params(),
+                index,
+            ))
+        }
     }
 }
 

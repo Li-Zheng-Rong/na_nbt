@@ -347,3 +347,65 @@ fn test_root_variants_deep_nesting_keys_and_overflow_bounds() {
     assert_all_modes_parity_be(&[9, 0, 0, 10, 0xFF, 0xFF, 0xFF, 0xFF]);
     assert_all_modes_parity_be(&[10, 0, 0, 12, 0, 1, b'a', 0xFF, 0xFF, 0xFF, 0xFF, 0]);
 }
+
+#[test]
+fn test_typed_list_dispatch_and_mutation_safety() {
+    use na_nbt::{ListMut, TypedListOwn, ValueMut};
+
+    // ListOwn::typed_ mismatch returns None without leaking
+    let mut str_list = ListOwn::<BigEndian>::default();
+    str_list.push("alpha");
+    str_list.push("beta");
+    assert!(str_list.typed_::<tag::Int>().is_none());
+
+    // Nested List of Lists with heterogeneous inner element types
+    let mut outer = ListOwn::<BigEndian>::default();
+    let mut inner_ints = TypedListOwn::<BigEndian, tag::Int>::default();
+    inner_ints.push(10);
+    inner_ints.push(20);
+    let mut inner_strs = ListOwn::<BigEndian>::default();
+    inner_strs.push("hello");
+    outer.push(inner_ints);
+    outer.push(inner_strs);
+
+    // Mismatched pop_ / remove_ must return None and leave outer untouched
+    assert!(outer.pop_::<tag::TypedList<tag::Int>>().is_none());
+    assert_eq!(outer.len(), 2);
+    assert!(outer.remove_::<tag::TypedList<tag::Int>>(1).is_none());
+    assert_eq!(outer.len(), 2);
+
+    // Matching remove_ on index 0 succeeds and leaves the String list at index 0
+    let removed = outer.remove_::<tag::TypedList<tag::Int>>(0).unwrap();
+    assert_eq!(removed.len(), 2);
+    assert_eq!(removed.get(1), Some(20));
+    assert_eq!(outer.len(), 1);
+    let popped_strs = outer.pop_::<tag::TypedList<tag::String>>().unwrap();
+    assert_eq!(popped_strs.len(), 1);
+    assert_eq!(&*popped_strs.get(0).unwrap().decode_lossy(), "hello");
+    assert!(outer.is_empty());
+
+    // Same via ListMut / ValueMut
+    let mut root = ValueOwn::List({
+        let mut l = ListOwn::<BigEndian>::default();
+        let mut i = TypedListOwn::<BigEndian, tag::Int>::default();
+        i.push(7);
+        let mut s = ListOwn::<BigEndian>::default();
+        s.push("world");
+        l.push(i);
+        l.push(s);
+        l
+    });
+    {
+        let mut mv = root.to_mut().into_::<tag::List>().unwrap();
+        assert!(mv.get_::<tag::TypedList<tag::Int>>(0).is_some());
+        assert!(mv.get_::<tag::TypedList<tag::Int>>(1).is_none());
+        assert!(mv.get_mut_::<tag::TypedList<tag::Int>>(1).is_none());
+        assert!(mv.pop_::<tag::TypedList<tag::Int>>().is_none());
+        assert_eq!(mv.len(), 2);
+        let s = mv.pop_::<tag::TypedList<tag::String>>().unwrap();
+        assert_eq!(s.len(), 1);
+        let i = mv.pop_::<tag::TypedList<tag::Int>>().unwrap();
+        assert_eq!(i.get(0), Some(7));
+        assert!(mv.is_empty());
+    }
+}

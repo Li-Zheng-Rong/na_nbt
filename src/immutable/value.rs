@@ -1,13 +1,10 @@
-use std::marker::PhantomData;
-
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, MapRef, NBT, TagID, ValueBase, ValueRef, VisitRef,
+    ByteOrder, MapRef, TagID, ValueBase, ValueRef, VisitRef,
     immutable::{
         array::ReadonlyArray, compound::ReadonlyCompound, config::ImmutableConfig,
         document::Document, list::ReadonlyList, string::ReadonlyString,
-        typed_list::ReadonlyTypedList,
     },
 };
 
@@ -98,118 +95,5 @@ impl<'doc, O: ByteOrder, D: Document> ValueRef<'doc> for ReadonlyValue<'doc, O, 
             ReadonlyValue::IntArray(value) => match_fn(MapRef::IntArray(value)),
             ReadonlyValue::LongArray(value) => match_fn(MapRef::LongArray(value)),
         }
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<()> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(_: ()) -> Self {
-        ReadonlyValue::End(())
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<i8> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: i8) -> Self {
-        ReadonlyValue::Byte(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<i16> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: i16) -> Self {
-        ReadonlyValue::Short(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<i32> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: i32) -> Self {
-        ReadonlyValue::Int(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<i64> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: i64) -> Self {
-        ReadonlyValue::Long(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<f32> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: f32) -> Self {
-        ReadonlyValue::Float(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<f64> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: f64) -> Self {
-        ReadonlyValue::Double(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyArray<'doc, i8, D>>
-    for ReadonlyValue<'doc, O, D>
-{
-    #[inline]
-    fn from(value: ReadonlyArray<'doc, i8, D>) -> Self {
-        ReadonlyValue::ByteArray(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyString<'doc, D>> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: ReadonlyString<'doc, D>) -> Self {
-        ReadonlyValue::String(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyList<'doc, O, D>> for ReadonlyValue<'doc, O, D> {
-    #[inline]
-    fn from(value: ReadonlyList<'doc, O, D>) -> Self {
-        ReadonlyValue::List(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyCompound<'doc, O, D>>
-    for ReadonlyValue<'doc, O, D>
-{
-    #[inline]
-    fn from(value: ReadonlyCompound<'doc, O, D>) -> Self {
-        ReadonlyValue::Compound(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyArray<'doc, byteorder::I32<O>, D>>
-    for ReadonlyValue<'doc, O, D>
-{
-    #[inline]
-    fn from(value: ReadonlyArray<'doc, byteorder::I32<O>, D>) -> Self {
-        ReadonlyValue::IntArray(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document> From<ReadonlyArray<'doc, byteorder::I64<O>, D>>
-    for ReadonlyValue<'doc, O, D>
-{
-    #[inline]
-    fn from(value: ReadonlyArray<'doc, byteorder::I64<O>, D>) -> Self {
-        ReadonlyValue::LongArray(value)
-    }
-}
-
-impl<'doc, O: ByteOrder, D: Document, T: NBT> From<ReadonlyTypedList<'doc, O, D, T>>
-    for ReadonlyValue<'doc, O, D>
-{
-    #[inline]
-    fn from(value: ReadonlyTypedList<'doc, O, D, T>) -> Self {
-        ReadonlyValue::List(ReadonlyList {
-            data: value.data,
-            mark: value.mark,
-            doc: value.doc,
-            _marker: PhantomData,
-        })
     }
 }

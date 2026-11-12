@@ -3,14 +3,10 @@ use std::{hint::unreachable_unchecked, marker::PhantomData, mem::ManuallyDrop, p
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigMut, ConfigRef, GenericNBT, IntoNBT, NBT, NBTBase, CompoundOwn, StringOwn,
-    TypedListOwn, ValueOwn, VecOwn, TagID, cold_path,
+    ByteOrder, CompoundOwn, ConfigMut, ConfigRef, GenericNBT, IntoNBT, NBT, NBTBase, StringOwn,
+    TagID, TypedListOwn, ValueOwn, VecOwn, cold_path,
     mutable::{
         config::MutableConfig, size::mutable_tag_size, value_mut::MutValue, value_ref::RefValue,
-    },
-    tag::{
-        Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
-        String,
     },
 };
 
@@ -50,6 +46,7 @@ impl<O: ByteOrder> ListOwn<O> {
         self.element_tag_id() == T::TAG_ID
             || (self.element_tag_id() == TagID::End && self.is_empty())
     }
+
     #[inline]
     pub fn len(&self) -> usize {
         unsafe { byteorder::U32::<O>::from_bytes(*self.data.as_ptr().add(1).cast()).get() as usize }
@@ -61,105 +58,18 @@ impl<O: ByteOrder> ListOwn<O> {
     }
 
     #[inline]
-    #[allow(clippy::unit_arg)]
     pub fn get<'a>(&'a self, index: usize) -> Option<RefValue<'a, O>> {
         if index >= self.len() {
             cold_path();
             return None;
         }
 
+        let tag_id = self.element_tag_id();
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(
-                    MutableConfig::<O>::read::<End>(MutableConfig::<O>::list_get::<End>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Byte => From::from(
-                    MutableConfig::<O>::read::<Byte>(MutableConfig::<O>::list_get::<Byte>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Short => From::from(
-                    MutableConfig::<O>::read::<Short>(MutableConfig::<O>::list_get::<Short>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Int => From::from(
-                    MutableConfig::<O>::read::<Int>(MutableConfig::<O>::list_get::<Int>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Long => From::from(
-                    MutableConfig::<O>::read::<Long>(MutableConfig::<O>::list_get::<Long>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Float => From::from(
-                    MutableConfig::<O>::read::<Float>(MutableConfig::<O>::list_get::<Float>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Double => From::from(
-                    MutableConfig::<O>::read::<Double>(MutableConfig::<O>::list_get::<Double>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::ByteArray => From::from(
-                    MutableConfig::<O>::read::<ByteArray>(
-                        MutableConfig::<O>::list_get::<ByteArray>(self._to_read_params(), index),
-                    )
-                    .unwrap_unchecked(),
-                ),
-                TagID::String => From::from(
-                    MutableConfig::<O>::read::<String>(MutableConfig::<O>::list_get::<String>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::List => From::from(
-                    MutableConfig::<O>::read::<List>(MutableConfig::<O>::list_get::<List>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Compound => From::from(
-                    MutableConfig::<O>::read::<Compound>(MutableConfig::<O>::list_get::<Compound>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::IntArray => From::from(
-                    MutableConfig::<O>::read::<IntArray>(MutableConfig::<O>::list_get::<IntArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::LongArray => From::from(
-                    MutableConfig::<O>::read::<LongArray>(
-                        MutableConfig::<O>::list_get::<LongArray>(self._to_read_params(), index),
-                    )
-                    .unwrap_unchecked(),
-                ),
-            })
+            Some(MutableConfig::<O>::read_value(
+                tag_id,
+                MutableConfig::<O>::list_get(tag_id, self._to_read_params(), index),
+            ))
         }
     }
 
@@ -173,7 +83,7 @@ impl<O: ByteOrder> ListOwn<O> {
             return None;
         }
 
-        if !(self.element_tag_id() == <T>::TAG_ID
+        if !(self.element_tag_id() == T::TAG_ID
             || (self.element_tag_id() == TagID::End && self.is_empty()))
         {
             cold_path();
@@ -181,7 +91,8 @@ impl<O: ByteOrder> ListOwn<O> {
         }
 
         unsafe {
-            MutableConfig::<O>::read::<T>(MutableConfig::<O>::list_get::<T>(
+            MutableConfig::<O>::read::<T>(MutableConfig::<O>::list_get(
+                T::TAG_ID,
                 self._to_read_params(),
                 index,
             ))
@@ -195,104 +106,12 @@ impl<O: ByteOrder> ListOwn<O> {
             return None;
         }
 
+        let tag_id = self.element_tag_id();
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(
-                    MutableConfig::<O>::read_mut::<End>(MutableConfig::<O>::list_get::<End>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Byte => From::from(
-                    MutableConfig::<O>::read_mut::<Byte>(MutableConfig::<O>::list_get::<Byte>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Short => From::from(
-                    MutableConfig::<O>::read_mut::<Short>(MutableConfig::<O>::list_get::<Short>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Int => From::from(
-                    MutableConfig::<O>::read_mut::<Int>(MutableConfig::<O>::list_get::<Int>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Long => From::from(
-                    MutableConfig::<O>::read_mut::<Long>(MutableConfig::<O>::list_get::<Long>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Float => From::from(
-                    MutableConfig::<O>::read_mut::<Float>(MutableConfig::<O>::list_get::<Float>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Double => From::from(
-                    MutableConfig::<O>::read_mut::<Double>(MutableConfig::<O>::list_get::<Double>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::ByteArray => From::from(
-                    MutableConfig::<O>::read_mut::<ByteArray>(MutableConfig::<O>::list_get::<
-                        ByteArray,
-                    >(
-                        self._to_read_params(), index
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::String => From::from(
-                    MutableConfig::<O>::read_mut::<String>(MutableConfig::<O>::list_get::<String>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::List => From::from(
-                    MutableConfig::<O>::read_mut::<List>(MutableConfig::<O>::list_get::<List>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Compound => From::from(
-                    MutableConfig::<O>::read_mut::<Compound>(MutableConfig::<O>::list_get::<
-                        Compound,
-                    >(
-                        self._to_read_params(), index
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::IntArray => From::from(
-                    MutableConfig::<O>::read_mut::<IntArray>(MutableConfig::<O>::list_get::<
-                        IntArray,
-                    >(
-                        self._to_read_params(), index
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::LongArray => From::from(
-                    MutableConfig::<O>::read_mut::<LongArray>(MutableConfig::<O>::list_get::<
-                        LongArray,
-                    >(
-                        self._to_read_params(), index
-                    ))
-                    .unwrap_unchecked(),
-                ),
-            })
+            Some(MutableConfig::<O>::read_value_mut(
+                tag_id,
+                MutableConfig::<O>::list_get(tag_id, self._to_read_params(), index),
+            ))
         }
     }
 
@@ -306,7 +125,7 @@ impl<O: ByteOrder> ListOwn<O> {
             return None;
         }
 
-        if !(self.element_tag_id() == <T>::TAG_ID
+        if !(self.element_tag_id() == T::TAG_ID
             || (self.element_tag_id() == TagID::End && self.is_empty()))
         {
             cold_path();
@@ -314,7 +133,8 @@ impl<O: ByteOrder> ListOwn<O> {
         }
 
         unsafe {
-            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get::<T>(
+            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get(
+                T::TAG_ID,
                 self._to_read_params(),
                 index,
             ))
@@ -346,47 +166,10 @@ impl<O: ByteOrder> ListOwn<O> {
         }
 
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(MutableConfig::<O>::list_pop::<End>(
-                    self._to_write_params(),
-                )?),
-                TagID::Byte => From::from(MutableConfig::<O>::list_pop::<Byte>(
-                    self._to_write_params(),
-                )?),
-                TagID::Short => From::from(MutableConfig::<O>::list_pop::<Short>(
-                    self._to_write_params(),
-                )?),
-                TagID::Int => From::from(MutableConfig::<O>::list_pop::<Int>(
-                    self._to_write_params(),
-                )?),
-                TagID::Long => From::from(MutableConfig::<O>::list_pop::<Long>(
-                    self._to_write_params(),
-                )?),
-                TagID::Float => From::from(MutableConfig::<O>::list_pop::<Float>(
-                    self._to_write_params(),
-                )?),
-                TagID::Double => From::from(MutableConfig::<O>::list_pop::<Double>(
-                    self._to_write_params(),
-                )?),
-                TagID::ByteArray => From::from(MutableConfig::<O>::list_pop::<ByteArray>(
-                    self._to_write_params(),
-                )?),
-                TagID::String => From::from(MutableConfig::<O>::list_pop::<String>(
-                    self._to_write_params(),
-                )?),
-                TagID::List => From::from(MutableConfig::<O>::list_pop::<List>(
-                    self._to_write_params(),
-                )?),
-                TagID::Compound => From::from(MutableConfig::<O>::list_pop::<Compound>(
-                    self._to_write_params(),
-                )?),
-                TagID::IntArray => From::from(MutableConfig::<O>::list_pop::<IntArray>(
-                    self._to_write_params(),
-                )?),
-                TagID::LongArray => From::from(MutableConfig::<O>::list_pop::<LongArray>(
-                    self._to_write_params(),
-                )?),
-            })
+            Some(MutableConfig::<O>::list_pop_value(
+                self.element_tag_id(),
+                self._to_write_params(),
+            ))
         }
     }
 
@@ -394,19 +177,22 @@ impl<O: ByteOrder> ListOwn<O> {
     pub fn pop_<T: GenericNBT>(
         &mut self,
     ) -> Option<T::Type<<MutableConfig<O> as ConfigRef>::ByteOrder>> {
-        if self.is_empty() {
+        let len = self.len();
+        if len == 0 || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
-        if self.element_tag_id() != <T>::TAG_ID
-        /* || (self.element_tag_id() == TagID::End && self.is_empty()) */
-        {
-            cold_path();
-            return None;
+        unsafe {
+            if !T::can_take_list_elem::<MutableConfig<O>>(self._to_read_params(), len - 1) {
+                cold_path();
+                return None;
+            }
+            T::own_into_(MutableConfig::<O>::list_pop_value(
+                T::TAG_ID,
+                self._to_write_params(),
+            ))
         }
-
-        unsafe { MutableConfig::<O>::list_pop::<T>(self._to_write_params()) }
     }
 
     #[inline]
@@ -443,91 +229,46 @@ impl<O: ByteOrder> ListOwn<O> {
         }
 
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(MutableConfig::<O>::list_remove::<End>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Byte => From::from(MutableConfig::<O>::list_remove::<Byte>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Short => From::from(MutableConfig::<O>::list_remove::<Short>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Int => From::from(MutableConfig::<O>::list_remove::<Int>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Long => From::from(MutableConfig::<O>::list_remove::<Long>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Float => From::from(MutableConfig::<O>::list_remove::<Float>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Double => From::from(MutableConfig::<O>::list_remove::<Double>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::ByteArray => From::from(MutableConfig::<O>::list_remove::<ByteArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::String => From::from(MutableConfig::<O>::list_remove::<String>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::List => From::from(MutableConfig::<O>::list_remove::<List>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Compound => From::from(MutableConfig::<O>::list_remove::<Compound>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::IntArray => From::from(MutableConfig::<O>::list_remove::<IntArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::LongArray => From::from(MutableConfig::<O>::list_remove::<LongArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-            })
+            Some(MutableConfig::<O>::list_remove_value(
+                self.element_tag_id(),
+                self._to_write_params(),
+                index,
+            ))
         }
     }
 
     #[inline]
     pub fn remove_<T: GenericNBT>(&mut self, index: usize) -> Option<T::Type<O>> {
-        if index >= self.len() {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
-        if self.element_tag_id() != <T>::TAG_ID
-        /* || (self.element_tag_id() == TagID::End && self.is_empty()) */
-        {
-            cold_path();
-            return None;
+        unsafe {
+            if !T::can_take_list_elem::<MutableConfig<O>>(self._to_read_params(), index) {
+                cold_path();
+                return None;
+            }
+            T::own_into_(MutableConfig::<O>::list_remove_value(
+                T::TAG_ID,
+                self._to_write_params(),
+                index,
+            ))
         }
-
-        unsafe { MutableConfig::<O>::list_remove::<T>(self._to_write_params(), index) }
     }
 
     #[inline]
     pub fn typed_<T: NBT>(self) -> Option<TypedListOwn<O, T>> {
+        if !self.element_is_::<T>() {
+            return None;
+        }
         let me = ManuallyDrop::new(self);
-        me.element_is_::<T>().then(|| {
-            let mut new = TypedListOwn {
-                data: unsafe { ptr::read(&me.data) },
-                _marker: PhantomData,
-            };
-            *unsafe { new.data.get_unchecked_mut(0) } = T::TAG_ID as u8;
-            new
-        })
+        let mut new = TypedListOwn {
+            data: unsafe { ptr::read(&me.data) },
+            _marker: PhantomData,
+        };
+        *unsafe { new.data.get_unchecked_mut(0) } = T::TAG_ID as u8;
+        Some(new)
     }
 }
 

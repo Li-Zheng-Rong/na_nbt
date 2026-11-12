@@ -4,10 +4,6 @@ use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, CompoundRef, GenericNBT, ListRef, MUTF8Str, NBT, TagID, TypedListRef, ValueRef,
-    tag::{
-        Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
-        String,
-    },
 };
 
 pub trait ConfigRef: Send + Sync + Sized + Clone + 'static {
@@ -31,23 +27,14 @@ pub trait ConfigRef: Send + Sync + Sized + Clone + 'static {
 
     type ReadParams<'a>: Sized;
 
-    /// .
-    ///
-    /// # Safety
-    ///
-    /// .
-    unsafe fn list_get<'a, 'doc, T: GenericNBT>(
+    unsafe fn list_get<'a, 'doc>(
+        tag_id: TagID,
         value: Self::ReadParams<'a>,
         index: usize,
     ) -> Self::ReadParams<'a>
     where
         'doc: 'a;
 
-    /// .
-    ///
-    /// # Safety
-    ///
-    /// .
     unsafe fn compound_get<'a, 'doc>(
         value: Self::ReadParams<'a>,
         key: &MUTF8Str,
@@ -55,42 +42,15 @@ pub trait ConfigRef: Send + Sync + Sized + Clone + 'static {
     where
         'doc: 'a;
 
-    /// .
-    ///
-    /// # Safety
-    ///
-    /// .
-    unsafe fn read<'a, 'doc, T: GenericNBT>(
-        params: Self::ReadParams<'a>,
-    ) -> Option<T::TypeRef<'doc, Self>>;
-
-    /// .
-    ///
-    /// # Safety
-    ///
-    /// .
-    #[inline]
-    #[allow(clippy::unit_arg)]
     unsafe fn read_value<'a, 'doc>(
         tag_id: TagID,
         params: Self::ReadParams<'a>,
-    ) -> Self::Value<'doc> {
-        unsafe {
-            match tag_id {
-                TagID::End => From::from(Self::read::<End>(params).unwrap_unchecked()),
-                TagID::Byte => From::from(Self::read::<Byte>(params).unwrap_unchecked()),
-                TagID::Short => From::from(Self::read::<Short>(params).unwrap_unchecked()),
-                TagID::Int => From::from(Self::read::<Int>(params).unwrap_unchecked()),
-                TagID::Long => From::from(Self::read::<Long>(params).unwrap_unchecked()),
-                TagID::Float => From::from(Self::read::<Float>(params).unwrap_unchecked()),
-                TagID::Double => From::from(Self::read::<Double>(params).unwrap_unchecked()),
-                TagID::ByteArray => From::from(Self::read::<ByteArray>(params).unwrap_unchecked()),
-                TagID::String => From::from(Self::read::<String>(params).unwrap_unchecked()),
-                TagID::List => From::from(Self::read::<List>(params).unwrap_unchecked()),
-                TagID::Compound => From::from(Self::read::<Compound>(params).unwrap_unchecked()),
-                TagID::IntArray => From::from(Self::read::<IntArray>(params).unwrap_unchecked()),
-                TagID::LongArray => From::from(Self::read::<LongArray>(params).unwrap_unchecked()),
-            }
-        }
+    ) -> Self::Value<'doc>;
+
+    #[inline]
+    unsafe fn read<'a, 'doc, T: GenericNBT>(
+        params: Self::ReadParams<'a>,
+    ) -> Option<T::TypeRef<'doc, Self>> {
+        T::ref_into_(unsafe { Self::read_value(T::TAG_ID, params) })
     }
 }

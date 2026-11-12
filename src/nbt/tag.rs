@@ -126,238 +126,120 @@ pub struct IntArray;
 #[derive(Clone, Copy)]
 pub struct LongArray;
 
-impl NBTBase for End {
-    const TAG_ID: TagID = TagID::End;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = ();
-    type TypeMut<'a, Config: ConfigMut> = &'a mut ();
-    type Type<O: ByteOrder> = ();
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        end: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        end(a)
-    }
+macro_rules! impl_nbt_tag {
+    ($(
+        $tag:ident => {
+            id: $tag_id:ident,
+            elem: $elem:ident,
+            ref_ty($($ref_lt:lifetime, $ref_cfg:ident)?): $ref_ty:ty,
+            mut_ty($mut_lt:lifetime, $mut_cfg:ident): $mut_ty:ty,
+            own_ty($own_ord:ident): $own_ty:ty,
+        }
+    ),* $(,)?) => {
+        $(
+            impl NBTBase for $tag {
+                const TAG_ID: TagID = TagID::$tag_id;
+                type Element = $elem;
+                type TypeRef<'a, Config: ConfigRef> = $ref_ty;
+                type TypeMut<$mut_lt, $mut_cfg: ConfigMut> = $mut_ty;
+                type Type<$own_ord: ByteOrder> = $own_ty;
+            }
+        )*
+    };
 }
 
-impl NBTBase for Byte {
-    const TAG_ID: TagID = TagID::Byte;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = i8;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut i8;
-    type Type<O: ByteOrder> = i8;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Short {
-    const TAG_ID: TagID = TagID::Short;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = i16;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut byteorder::I16<Config::ByteOrder>;
-    type Type<O: ByteOrder> = byteorder::I16<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Int {
-    const TAG_ID: TagID = TagID::Int;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = i32;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut byteorder::I32<Config::ByteOrder>;
-    type Type<O: ByteOrder> = byteorder::I32<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Long {
-    const TAG_ID: TagID = TagID::Long;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = i64;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut byteorder::I64<Config::ByteOrder>;
-    type Type<O: ByteOrder> = byteorder::I64<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Float {
-    const TAG_ID: TagID = TagID::Float;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = f32;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut byteorder::F32<Config::ByteOrder>;
-    type Type<O: ByteOrder> = byteorder::F32<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Double {
-    const TAG_ID: TagID = TagID::Double;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = f64;
-    type TypeMut<'a, Config: ConfigMut> = &'a mut byteorder::F64<Config::ByteOrder>;
-    type Type<O: ByteOrder> = byteorder::F64<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for ByteArray {
-    const TAG_ID: TagID = TagID::ByteArray;
-    type Element = Byte;
-    type TypeRef<'a, Config: ConfigRef> = Config::ByteArray<'a>;
-    type TypeMut<'a, Config: ConfigMut> = VecMut<'a, i8>;
-    type Type<O: ByteOrder> = VecOwn<i8>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for String {
-    const TAG_ID: TagID = TagID::String;
-    type Element = Byte;
-    type TypeRef<'a, Config: ConfigRef> = Config::String<'a>;
-    type TypeMut<'a, Config: ConfigMut> = StringMut<'a>;
-    type Type<O: ByteOrder> = StringOwn;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for List {
-    const TAG_ID: TagID = TagID::List;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = Config::List<'a>;
-    type TypeMut<'a, Config: ConfigMut> = Config::ListMut<'a>;
-    type Type<O: ByteOrder> = ListOwn<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for Compound {
-    const TAG_ID: TagID = TagID::Compound;
-    type Element = Self;
-    type TypeRef<'a, Config: ConfigRef> = Config::Compound<'a>;
-    type TypeMut<'a, Config: ConfigMut> = Config::CompoundMut<'a>;
-    type Type<O: ByteOrder> = CompoundOwn<O>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for IntArray {
-    const TAG_ID: TagID = TagID::IntArray;
-    type Element = Int;
-    type TypeRef<'a, Config: ConfigRef> = Config::IntArray<'a>;
-    type TypeMut<'a, Config: ConfigMut> = VecMut<'a, byteorder::I32<Config::ByteOrder>>;
-    type Type<O: ByteOrder> = VecOwn<byteorder::I32<O>>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
-}
-
-impl NBTBase for LongArray {
-    const TAG_ID: TagID = TagID::LongArray;
-    type Element = Long;
-    type TypeRef<'a, Config: ConfigRef> = Config::LongArray<'a>;
-    type TypeMut<'a, Config: ConfigMut> = VecMut<'a, byteorder::I64<Config::ByteOrder>>;
-    type Type<O: ByteOrder> = VecOwn<byteorder::I64<O>>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        normal: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-    ) -> R {
-        normal(a)
-    }
+impl_nbt_tag! {
+    End => {
+        id: End,
+        elem: End,
+        ref_ty(): (),
+        mut_ty('a, Config): &'a mut (),
+        own_ty(O): (),
+    },
+    Byte => {
+        id: Byte,
+        elem: Byte,
+        ref_ty(): i8,
+        mut_ty('a, Config): &'a mut i8,
+        own_ty(O): i8,
+    },
+    Short => {
+        id: Short,
+        elem: Short,
+        ref_ty(): i16,
+        mut_ty('a, Config): &'a mut byteorder::I16<Config::ByteOrder>,
+        own_ty(O): byteorder::I16<O>,
+    },
+    Int => {
+        id: Int,
+        elem: Int,
+        ref_ty(): i32,
+        mut_ty('a, Config): &'a mut byteorder::I32<Config::ByteOrder>,
+        own_ty(O): byteorder::I32<O>,
+    },
+    Long => {
+        id: Long,
+        elem: Long,
+        ref_ty(): i64,
+        mut_ty('a, Config): &'a mut byteorder::I64<Config::ByteOrder>,
+        own_ty(O): byteorder::I64<O>,
+    },
+    Float => {
+        id: Float,
+        elem: Float,
+        ref_ty(): f32,
+        mut_ty('a, Config): &'a mut byteorder::F32<Config::ByteOrder>,
+        own_ty(O): byteorder::F32<O>,
+    },
+    Double => {
+        id: Double,
+        elem: Double,
+        ref_ty(): f64,
+        mut_ty('a, Config): &'a mut byteorder::F64<Config::ByteOrder>,
+        own_ty(O): byteorder::F64<O>,
+    },
+    ByteArray => {
+        id: ByteArray,
+        elem: Byte,
+        ref_ty('a, Config): Config::ByteArray<'a>,
+        mut_ty('a, Config): VecMut<'a, i8>,
+        own_ty(O): VecOwn<i8>,
+    },
+    String => {
+        id: String,
+        elem: Byte,
+        ref_ty('a, Config): Config::String<'a>,
+        mut_ty('a, Config): StringMut<'a>,
+        own_ty(O): StringOwn,
+    },
+    List => {
+        id: List,
+        elem: List,
+        ref_ty('a, Config): Config::List<'a>,
+        mut_ty('a, Config): Config::ListMut<'a>,
+        own_ty(O): ListOwn<O>,
+    },
+    Compound => {
+        id: Compound,
+        elem: Compound,
+        ref_ty('a, Config): Config::Compound<'a>,
+        mut_ty('a, Config): Config::CompoundMut<'a>,
+        own_ty(O): CompoundOwn<O>,
+    },
+    IntArray => {
+        id: IntArray,
+        elem: Int,
+        ref_ty('a, Config): Config::IntArray<'a>,
+        mut_ty('a, Config): VecMut<'a, byteorder::I32<Config::ByteOrder>>,
+        own_ty(O): VecOwn<byteorder::I32<O>>,
+    },
+    LongArray => {
+        id: LongArray,
+        elem: Long,
+        ref_ty('a, Config): Config::LongArray<'a>,
+        mut_ty('a, Config): VecMut<'a, byteorder::I64<Config::ByteOrder>>,
+        own_ty(O): VecOwn<byteorder::I64<O>>,
+    },
 }
 
 /// Marker type for a typed list (Tag ID: 9, same as List).
@@ -370,14 +252,4 @@ impl<T: NBT> NBTBase for TypedList<T> {
     type TypeRef<'a, Config: ConfigRef> = Config::TypedList<'a, T>;
     type TypeMut<'a, Config: ConfigMut> = Config::TypedListMut<'a, T>;
     type Type<O: ByteOrder> = TypedListOwn<O, T>;
-
-    #[inline]
-    fn dispatch<A, R>(
-        a: A,
-        _: impl FnOnce(A) -> R,
-        _: impl FnOnce(A) -> R,
-        typed_list: impl FnOnce(A) -> R,
-    ) -> R {
-        typed_list(a)
-    }
 }

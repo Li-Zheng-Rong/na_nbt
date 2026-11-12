@@ -17,10 +17,7 @@ use crate::{
     CompoundBase, ConfigMut, ConfigRef, GenericNBT, IntoNBT, ListBase, MapMut, NBT, NBTBase, TagID,
     TypedListBase, ValueBase, ValueOwn, VisitMut, VisitMutShared, cold_path,
     index::Index,
-    tag::{
-        Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
-        String, TypedList,
-    },
+    tag::{Compound, List},
     with_mutf8_key,
 };
 
@@ -33,35 +30,7 @@ use crate::{
 /// # Type Parameters
 ///
 /// * `'s` - Lifetime of the source data
-pub trait ValueMut<'s>:
-    ValueBase
-    + From<<End as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Byte as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Short as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Int as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Long as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Float as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Double as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<ByteArray as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<String as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<List as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<Compound as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<IntArray as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<LongArray as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<End> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Byte> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Short> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Int> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Long> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Float> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Double> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<ByteArray> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<String> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<List> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<Compound> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<IntArray> as NBTBase>::TypeMut<'s, Self::Config>>
-    + From<<TypedList<LongArray> as NBTBase>::TypeMut<'s, Self::Config>>
-{
+pub trait ValueMut<'s>: ValueBase {
     type Config: ConfigMut;
 
     #[inline]
@@ -184,7 +153,6 @@ pub trait ListMut<'s>:
         's: 'a;
 
     #[inline]
-    #[allow(clippy::unit_arg)]
     fn get<'a>(&'a self, index: usize) -> Option<<Self::Config as ConfigRef>::Value<'a>>
     where
         's: 'a,
@@ -194,100 +162,12 @@ pub trait ListMut<'s>:
             return None;
         }
 
+        let tag_id = self.element_tag_id();
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(
-                    Self::Config::read::<End>(Self::Config::list_get::<End>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Byte => From::from(
-                    Self::Config::read::<Byte>(Self::Config::list_get::<Byte>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Short => From::from(
-                    Self::Config::read::<Short>(Self::Config::list_get::<Short>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Int => From::from(
-                    Self::Config::read::<Int>(Self::Config::list_get::<Int>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Long => From::from(
-                    Self::Config::read::<Long>(Self::Config::list_get::<Long>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Float => From::from(
-                    Self::Config::read::<Float>(Self::Config::list_get::<Float>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Double => From::from(
-                    Self::Config::read::<Double>(Self::Config::list_get::<Double>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::ByteArray => From::from(
-                    Self::Config::read::<ByteArray>(Self::Config::list_get::<ByteArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::String => From::from(
-                    Self::Config::read::<String>(Self::Config::list_get::<String>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::List => From::from(
-                    Self::Config::read::<List>(Self::Config::list_get::<List>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Compound => From::from(
-                    Self::Config::read::<Compound>(Self::Config::list_get::<Compound>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::IntArray => From::from(
-                    Self::Config::read::<IntArray>(Self::Config::list_get::<IntArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::LongArray => From::from(
-                    Self::Config::read::<LongArray>(Self::Config::list_get::<LongArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-            })
+            Some(Self::Config::read_value(
+                tag_id,
+                Self::Config::list_get(tag_id, self._to_read_params(), index),
+            ))
         }
     }
 
@@ -301,7 +181,7 @@ pub trait ListMut<'s>:
             return None;
         }
 
-        if !(self.element_tag_id() == <T>::TAG_ID
+        if !(self.element_tag_id() == T::TAG_ID
             || (self.element_tag_id() == TagID::End && self.is_empty()))
         {
             cold_path();
@@ -309,7 +189,11 @@ pub trait ListMut<'s>:
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get::<T>(self._to_read_params(), index))
+            Self::Config::read::<T>(Self::Config::list_get(
+                T::TAG_ID,
+                self._to_read_params(),
+                index,
+            ))
         }
     }
 
@@ -323,100 +207,12 @@ pub trait ListMut<'s>:
             return None;
         }
 
+        let tag_id = self.element_tag_id();
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(
-                    Self::Config::read_mut::<End>(Self::Config::list_get::<End>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Byte => From::from(
-                    Self::Config::read_mut::<Byte>(Self::Config::list_get::<Byte>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Short => From::from(
-                    Self::Config::read_mut::<Short>(Self::Config::list_get::<Short>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Int => From::from(
-                    Self::Config::read_mut::<Int>(Self::Config::list_get::<Int>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Long => From::from(
-                    Self::Config::read_mut::<Long>(Self::Config::list_get::<Long>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Float => From::from(
-                    Self::Config::read_mut::<Float>(Self::Config::list_get::<Float>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Double => From::from(
-                    Self::Config::read_mut::<Double>(Self::Config::list_get::<Double>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::ByteArray => From::from(
-                    Self::Config::read_mut::<ByteArray>(Self::Config::list_get::<ByteArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::String => From::from(
-                    Self::Config::read_mut::<String>(Self::Config::list_get::<String>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::List => From::from(
-                    Self::Config::read_mut::<List>(Self::Config::list_get::<List>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::Compound => From::from(
-                    Self::Config::read_mut::<Compound>(Self::Config::list_get::<Compound>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::IntArray => From::from(
-                    Self::Config::read_mut::<IntArray>(Self::Config::list_get::<IntArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-                TagID::LongArray => From::from(
-                    Self::Config::read_mut::<LongArray>(Self::Config::list_get::<LongArray>(
-                        self._to_read_params(),
-                        index,
-                    ))
-                    .unwrap_unchecked(),
-                ),
-            })
+            Some(Self::Config::read_value_mut(
+                tag_id,
+                Self::Config::list_get(tag_id, self._to_read_params(), index),
+            ))
         }
     }
 
@@ -433,7 +229,7 @@ pub trait ListMut<'s>:
             return None;
         }
 
-        if !(self.element_tag_id() == <T>::TAG_ID
+        if !(self.element_tag_id() == T::TAG_ID
             || (self.element_tag_id() == TagID::End && self.is_empty()))
         {
             cold_path();
@@ -441,7 +237,11 @@ pub trait ListMut<'s>:
         }
 
         unsafe {
-            Self::Config::read_mut::<T>(Self::Config::list_get::<T>(self._to_read_params(), index))
+            Self::Config::read_mut::<T>(Self::Config::list_get(
+                T::TAG_ID,
+                self._to_read_params(),
+                index,
+            ))
         }
     }
 
@@ -468,55 +268,31 @@ pub trait ListMut<'s>:
         }
 
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(Self::Config::list_pop::<End>(self._to_write_params())?),
-                TagID::Byte => From::from(Self::Config::list_pop::<Byte>(self._to_write_params())?),
-                TagID::Short => {
-                    From::from(Self::Config::list_pop::<Short>(self._to_write_params())?)
-                }
-                TagID::Int => From::from(Self::Config::list_pop::<Int>(self._to_write_params())?),
-                TagID::Long => From::from(Self::Config::list_pop::<Long>(self._to_write_params())?),
-                TagID::Float => {
-                    From::from(Self::Config::list_pop::<Float>(self._to_write_params())?)
-                }
-                TagID::Double => {
-                    From::from(Self::Config::list_pop::<Double>(self._to_write_params())?)
-                }
-                TagID::ByteArray => From::from(Self::Config::list_pop::<ByteArray>(
-                    self._to_write_params(),
-                )?),
-                TagID::String => {
-                    From::from(Self::Config::list_pop::<String>(self._to_write_params())?)
-                }
-                TagID::List => From::from(Self::Config::list_pop::<List>(self._to_write_params())?),
-                TagID::Compound => {
-                    From::from(Self::Config::list_pop::<Compound>(self._to_write_params())?)
-                }
-                TagID::IntArray => {
-                    From::from(Self::Config::list_pop::<IntArray>(self._to_write_params())?)
-                }
-                TagID::LongArray => From::from(Self::Config::list_pop::<LongArray>(
-                    self._to_write_params(),
-                )?),
-            })
+            Some(Self::Config::list_pop_value(
+                self.element_tag_id(),
+                self._to_write_params(),
+            ))
         }
     }
 
     #[inline]
     fn pop_<T: GenericNBT>(&mut self) -> Option<T::Type<<Self::Config as ConfigRef>::ByteOrder>> {
-        if self.is_empty() {
+        let len = self.len();
+        if len == 0 || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
-        if self.element_tag_id() != <T>::TAG_ID
-        /* || (self.element_tag_id() == TagID::End && self.is_empty()) */
-        {
-            cold_path();
-            return None;
+        unsafe {
+            if !T::can_take_list_elem::<Self::Config>(self._to_read_params(), len - 1) {
+                cold_path();
+                return None;
+            }
+            T::own_into_(Self::Config::list_pop_value(
+                T::TAG_ID,
+                self._to_write_params(),
+            ))
         }
-
-        unsafe { Self::Config::list_pop::<T>(self._to_write_params()) }
     }
 
     #[inline]
@@ -553,60 +329,11 @@ pub trait ListMut<'s>:
         }
 
         unsafe {
-            Some(match self.element_tag_id() {
-                TagID::End => From::from(Self::Config::list_remove::<End>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Byte => From::from(Self::Config::list_remove::<Byte>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Short => From::from(Self::Config::list_remove::<Short>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Int => From::from(Self::Config::list_remove::<Int>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Long => From::from(Self::Config::list_remove::<Long>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Float => From::from(Self::Config::list_remove::<Float>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Double => From::from(Self::Config::list_remove::<Double>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::ByteArray => From::from(Self::Config::list_remove::<ByteArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::String => From::from(Self::Config::list_remove::<String>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::List => From::from(Self::Config::list_remove::<List>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::Compound => From::from(Self::Config::list_remove::<Compound>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::IntArray => From::from(Self::Config::list_remove::<IntArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-                TagID::LongArray => From::from(Self::Config::list_remove::<LongArray>(
-                    self._to_write_params(),
-                    index,
-                )?),
-            })
+            Some(Self::Config::list_remove_value(
+                self.element_tag_id(),
+                self._to_write_params(),
+                index,
+            ))
         }
     }
 
@@ -615,19 +342,22 @@ pub trait ListMut<'s>:
         &mut self,
         index: usize,
     ) -> Option<T::Type<<Self::Config as ConfigRef>::ByteOrder>> {
-        if index >= self.len() {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
-        if self.element_tag_id() != <T>::TAG_ID
-        /* || (self.element_tag_id() == TagID::End && self.is_empty()) */
-        {
-            cold_path();
-            return None;
+        unsafe {
+            if !T::can_take_list_elem::<Self::Config>(self._to_read_params(), index) {
+                cold_path();
+                return None;
+            }
+            T::own_into_(Self::Config::list_remove_value(
+                T::TAG_ID,
+                self._to_write_params(),
+                index,
+            ))
         }
-
-        unsafe { Self::Config::list_remove::<T>(self._to_write_params(), index) }
     }
 
     fn typed_<T: NBT>(self) -> Option<<Self::Config as ConfigMut>::TypedListMut<'s, T>>;
@@ -679,7 +409,11 @@ pub trait TypedListMut<'s, T: NBT>:
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get::<T>(self._to_read_params(), index))
+            Self::Config::read::<T>(Self::Config::list_get(
+                T::TAG_ID,
+                self._to_read_params(),
+                index,
+            ))
         }
     }
 
@@ -694,7 +428,11 @@ pub trait TypedListMut<'s, T: NBT>:
         }
 
         unsafe {
-            Self::Config::read_mut::<T>(Self::Config::list_get::<T>(self._to_read_params(), index))
+            Self::Config::read_mut::<T>(Self::Config::list_get(
+                T::TAG_ID,
+                self._to_read_params(),
+                index,
+            ))
         }
     }
 
@@ -710,7 +448,12 @@ pub trait TypedListMut<'s, T: NBT>:
             return None;
         }
 
-        unsafe { Self::Config::list_pop::<T>(self._to_write_params()) }
+        unsafe {
+            T::own_into_(Self::Config::list_pop_value(
+                T::TAG_ID,
+                self._to_write_params(),
+            ))
+        }
     }
 
     #[inline]
@@ -734,7 +477,13 @@ pub trait TypedListMut<'s, T: NBT>:
             return None;
         }
 
-        unsafe { Self::Config::list_remove::<T>(self._to_write_params(), index) }
+        unsafe {
+            T::own_into_(Self::Config::list_remove_value(
+                T::TAG_ID,
+                self._to_write_params(),
+                index,
+            ))
+        }
     }
 
     fn iter<'a>(&'a self) -> <Self::Config as ConfigRef>::TypedListIter<'a, T>

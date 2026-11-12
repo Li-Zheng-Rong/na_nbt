@@ -3,12 +3,10 @@ use std::marker::PhantomData;
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, MapMut, StringMut, VecMut, NBT, TagID, ValueBase, ValueMut, VisitMut,
-    VisitMutShared,
+    ByteOrder, MapMut, StringMut, TagID, ValueBase, ValueMut, VecMut, VisitMut, VisitMutShared,
     mutable::{
         compound_mut::MutCompound, compound_ref::RefCompound, config::MutableConfig,
-        list_mut::MutList, list_ref::RefList, string_ref::RefString, typed_list_mut::MutTypedList,
-        value_ref::RefValue,
+        list_mut::MutList, list_ref::RefList, string_ref::RefString, value_ref::RefValue,
     },
 };
 
@@ -144,106 +142,5 @@ impl<'s, O: ByteOrder> ValueMut<'s> for MutValue<'s, O> {
             MutValue::IntArray(value) => RefValue::IntArray(value),
             MutValue::LongArray(value) => RefValue::LongArray(value),
         }
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut ()> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut ()) -> Self {
-        MutValue::End(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut i8> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut i8) -> Self {
-        MutValue::Byte(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut byteorder::I16<O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut byteorder::I16<O>) -> Self {
-        MutValue::Short(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut byteorder::I32<O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut byteorder::I32<O>) -> Self {
-        MutValue::Int(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut byteorder::I64<O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut byteorder::I64<O>) -> Self {
-        MutValue::Long(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut byteorder::F32<O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut byteorder::F32<O>) -> Self {
-        MutValue::Float(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s mut byteorder::F64<O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: &'s mut byteorder::F64<O>) -> Self {
-        MutValue::Double(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<VecMut<'s, i8>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: VecMut<'s, i8>) -> Self {
-        MutValue::ByteArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<StringMut<'s>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: StringMut<'s>) -> Self {
-        MutValue::String(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<MutList<'s, O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: MutList<'s, O>) -> Self {
-        MutValue::List(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<MutCompound<'s, O>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: MutCompound<'s, O>) -> Self {
-        MutValue::Compound(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<VecMut<'s, byteorder::I32<O>>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: VecMut<'s, byteorder::I32<O>>) -> Self {
-        MutValue::IntArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<VecMut<'s, byteorder::I64<O>>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: VecMut<'s, byteorder::I64<O>>) -> Self {
-        MutValue::LongArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder, T: NBT> From<MutTypedList<'s, O, T>> for MutValue<'s, O> {
-    #[inline]
-    fn from(value: MutTypedList<'s, O, T>) -> Self {
-        MutValue::List(MutList {
-            data: value.data,
-            _marker: PhantomData,
-        })
     }
 }

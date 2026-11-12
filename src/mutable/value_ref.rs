@@ -1,12 +1,9 @@
-use std::marker::PhantomData;
-
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, MapRef, NBT, TagID, ValueBase, ValueRef, VisitRef,
+    ByteOrder, MapRef, TagID, ValueBase, ValueRef, VisitRef,
     mutable::{
         compound_ref::RefCompound, config::MutableConfig, list_ref::RefList, string_ref::RefString,
-        typed_list_ref::RefTypedList,
     },
 };
 
@@ -97,106 +94,5 @@ impl<'s, O: ByteOrder> ValueRef<'s> for RefValue<'s, O> {
             RefValue::IntArray(value) => match_fn(MapRef::IntArray(value)),
             RefValue::LongArray(value) => match_fn(MapRef::LongArray(value)),
         }
-    }
-}
-
-impl<'s, O: ByteOrder> From<()> for RefValue<'s, O> {
-    #[inline]
-    fn from(_: ()) -> Self {
-        RefValue::End(())
-    }
-}
-
-impl<'s, O: ByteOrder> From<i8> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: i8) -> Self {
-        RefValue::Byte(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<i16> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: i16) -> Self {
-        RefValue::Short(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<i32> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: i32) -> Self {
-        RefValue::Int(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<i64> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: i64) -> Self {
-        RefValue::Long(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<f32> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: f32) -> Self {
-        RefValue::Float(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<f64> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: f64) -> Self {
-        RefValue::Double(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s [i8]> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: &'s [i8]) -> Self {
-        RefValue::ByteArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<RefString<'s>> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: RefString<'s>) -> Self {
-        RefValue::String(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<RefList<'s, O>> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: RefList<'s, O>) -> Self {
-        RefValue::List(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<RefCompound<'s, O>> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: RefCompound<'s, O>) -> Self {
-        RefValue::Compound(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s [byteorder::I32<O>]> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: &'s [byteorder::I32<O>]) -> Self {
-        RefValue::IntArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder> From<&'s [byteorder::I64<O>]> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: &'s [byteorder::I64<O>]) -> Self {
-        RefValue::LongArray(value)
-    }
-}
-
-impl<'s, O: ByteOrder, T: NBT> From<RefTypedList<'s, O, T>> for RefValue<'s, O> {
-    #[inline]
-    fn from(value: RefTypedList<'s, O, T>) -> Self {
-        RefValue::List(RefList {
-            data: value.data,
-            _marker: PhantomData,
-        })
     }
 }

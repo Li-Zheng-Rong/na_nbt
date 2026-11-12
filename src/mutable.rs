@@ -62,13 +62,10 @@ pub fn read_owned<SOURCE: ByteOrder, STORE: ByteOrder>(source: &[u8]) -> Result<
         current_pos = current_pos.add(2 + name_len as usize);
 
         let value = if TypeId::of::<SOURCE>() == TypeId::of::<STORE>() {
-            let result = read_unsafe::<SOURCE>(tag_id, &mut current_pos, end_pos)?;
-            Ok(std::mem::transmute::<ValueOwn<SOURCE>, ValueOwn<STORE>>(
-                result,
-            ))
+            read_unsafe::<STORE>(tag_id, &mut current_pos, end_pos)?
         } else {
-            read_unsafe_fallback::<SOURCE, STORE>(tag_id, &mut current_pos, end_pos)
-        }?;
+            read_unsafe_fallback::<SOURCE, STORE>(tag_id, &mut current_pos, end_pos)?
+        };
 
         if current_pos < end_pos {
             cold_path();
