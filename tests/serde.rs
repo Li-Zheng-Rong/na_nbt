@@ -1691,6 +1691,373 @@ fn test_unit_enum_serialization_as_key_string() {
     );
 }
 
+// ============================================================================
+// Deserialization Regression & Hardening Tests
+// ============================================================================
+
+#[test]
+fn test_map_key_and_field_mutf8_null_char() {
+    // MUTF-8 encodes '\0' as 0xC0 0x80; CompoundAccess must decode keys via MUTF-8
+    let mut str_map: HashMap<String, i32> = HashMap::new();
+    str_map.insert("\0".to_string(), 1);
+    str_map.insert("prefix\0suffix".to_string(), 2);
+    str_map.insert("\0\0".to_string(), 3);
+    round_trip_both(&str_map);
+
+    let mut char_map: HashMap<char, i32> = HashMap::new();
+    char_map.insert('\0', 10);
+    char_map.insert('A', 20);
+    round_trip_both(&char_map);
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct NullField {
+        #[serde(rename = "a\0b")]
+        val: i32,
+    }
+    round_trip_both(&NullField { val: 77 });
+}
+
+#[test]
+fn test_option_malformed_validation() {
+    // 1. Non-empty field name inside wrapped Option Compound { "x": 42i8 } must be rejected
+    let non_empty_key = [
+        10u8, 0, 0, // root Compound ""
+        1, 0, 1, b'x', 42, // Byte "x" = 42
+        0,  // End
+    ];
+    assert!(from_slice_be::<Option<i8>>(&non_empty_key).is_err());
+
+    // 2. Non-End trailing byte after wrapped Option value must be rejected
+    let bad_trailing_tag = [
+        10u8, 0, 0, // root Compound ""
+        1, 0, 0, 42, // Byte "" = 42
+        99, // invalid trailing tag instead of 0x00 TAG_End
+    ];
+    assert!(matches!(
+        from_slice_be::<Option<i8>>(&bad_trailing_tag),
+        Err(na_nbt::Error::INVALID(99))
+    ));
+
+    // 3. Extra field after wrapped Option value Compound { "": 42i8, "y": 7i8 } must be rejected
+    let two_fields = [
+        10u8, 0, 0, // root Compound ""
+        1, 0, 0, 42, // Byte "" = 42
+        1, 0, 1, b'y', 7, // extra Byte "y" = 7
+        0, // End
+    ];
+    assert!(matches!(
+        from_slice_be::<Option<i8>>(&two_fields),
+        Err(na_nbt::Error::INVALID(1))
+    ));
+
+    // 4. Inner deserialization error must not be masked by Error::EOF
+    let invalid_char_in_option = [
+        10u8, 0, 0, // root Compound ""
+        3, 0, 0, 0x00, 0x11, 0x00, 0x00, // Int "" = 0x110000 (invalid char), no trailing End
+    ];
+    assert!(matches!(
+        from_slice_be::<Option<char>>(&invalid_char_in_option),
+        Err(na_nbt::Error::CHAR(0x110000))
+    ));
+}
+
+#[test]
+fn test_deserialize_byte_buf_regression() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct OwnedBytes(Vec<u8>);
+
+    impl Serialize for OwnedBytes {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for OwnedBytes {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = OwnedBytes;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("byte buf")
+                }
+                fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                    Ok(OwnedBytes(v))
+                }
+            }
+            deserializer.deserialize_byte_buf(V)
+        }
+    }
+
+    // Root and struct field round-trip via TAG_ByteArray -> deserialize_byte_buf
+    round_trip_both(&OwnedBytes(vec![]));
+    round_trip_both(&OwnedBytes(vec![0, 1, 127, 128, 255]));
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Holder {
+        a: OwnedBytes,
+        b: Option<OwnedBytes>,
+    }
+    round_trip_both(&Holder {
+        a: OwnedBytes(vec![10, 20, 30]),
+        b: Some(OwnedBytes(vec![40, 50])),
+    });
+
+    // TAG_List must be rejected with MISMATCH (expected ByteArray, actual List)
+    let list_bytes = to_vec_be(&vec![1u8, 2, 3]).unwrap();
+    assert!(matches!(
+        from_slice_be::<OwnedBytes>(&list_bytes),
+        Err(na_nbt::Error::MISMATCH {
+            expected: na_nbt::TagID::ByteArray,
+            actual: na_nbt::TagID::List,
+        })
+    ));
+}
+
+#[cfg(feature = "i128")]
+#[test]
+fn test_i128_validates_int_array_length() {
+    #[derive(Debug, Serialize, Deserialize)]
+    struct WithEmptyIntArray {
+        #[serde(with = "na_nbt::int_array")]
+        uuid: Vec<i32>,
+        extra: [i32; 4],
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ExpectU128 {
+        #[allow(dead_code)]
+        uuid: u128,
+        #[allow(dead_code)]
+        extra: [i32; 4],
+    }
+
+    // Root IntArray of length 0 or 3 must fail i128/u128 deserialization
+    let empty_arr = [11u8, 0, 0, 0, 0, 0, 0];
+    assert!(from_slice_be::<i128>(&empty_arr).is_err());
+
+    let five_arr = [
+        11u8, 0, 0, 0, 0, 0, 5, // IntArray len = 5
+        0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+    ];
+    assert!(from_slice_be::<u128>(&five_arr).is_err());
+
+    // Inside a compound, length != 4 must error rather than misreading subsequent fields
+    let bytes = to_vec_be(&WithEmptyIntArray {
+        uuid: vec![],
+        extra: [1, 2, 3, 4],
+    })
+    .unwrap();
+    assert!(from_slice_be::<ExpectU128>(&bytes).is_err());
+}
+
+#[test]
+fn test_zero_copy_borrowed_str_and_bytes() {
+    use std::borrow::Cow;
+
+    #[derive(Debug, PartialEq, Serialize)]
+    struct OwnedBorrowSource {
+        text: String,
+        cow_ascii: String,
+        cow_mutf8: String,
+        #[serde(with = "na_nbt::byte_array")]
+        raw: Vec<i8>,
+        map: HashMap<String, String>,
+        opt_map: HashMap<Option<String>, i32>,
+    }
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct BorrowedTarget<'a> {
+        text: &'a str,
+        #[serde(borrow)]
+        cow_ascii: Cow<'a, str>,
+        #[serde(borrow)]
+        cow_mutf8: Cow<'a, str>,
+        raw: &'a [u8],
+        #[serde(borrow)]
+        map: HashMap<&'a str, &'a str>,
+        #[serde(borrow)]
+        opt_map: HashMap<Option<&'a str>, i32>,
+    }
+
+    let mut map = HashMap::new();
+    map.insert("alpha".to_string(), "ascii_value".to_string());
+
+    let mut opt_map = HashMap::new();
+    opt_map.insert(Some("borrowed_opt_key".to_string()), 7);
+    opt_map.insert(None, 0);
+
+    let src = OwnedBorrowSource {
+        text: "zero_copy_hello".to_string(),
+        cow_ascii: "borrowed_cow".to_string(),
+        cow_mutf8: "null\0owned_cow".to_string(),
+        raw: vec![10, 20, 30, -40],
+        map,
+        opt_map,
+    };
+
+    let bytes = to_vec_be(&src).unwrap();
+    let parsed: BorrowedTarget<'_> = from_slice_be(&bytes).unwrap();
+
+    assert_eq!(parsed.text, "zero_copy_hello");
+    assert_eq!(parsed.raw, &[10u8, 20, 30, 216]);
+
+    // Verify pointers point directly inside `bytes` (true zero-copy)
+    let range = bytes.as_ptr_range();
+    assert!(range.contains(&parsed.text.as_ptr()));
+    assert!(range.contains(&parsed.raw.as_ptr()));
+    assert!(matches!(
+        &parsed.cow_ascii,
+        Cow::Borrowed(s) if *s == "borrowed_cow" && range.contains(&s.as_ptr())
+    ));
+    assert!(matches!(
+        &parsed.cow_mutf8,
+        Cow::Owned(s) if s == "null\0owned_cow"
+    ));
+
+    let (&k, &v) = parsed.map.get_key_value("alpha").unwrap();
+    assert_eq!(v, "ascii_value");
+    assert!(range.contains(&k.as_ptr()));
+    assert!(range.contains(&v.as_ptr()));
+    assert_eq!(parsed.opt_map.get(&Some("borrowed_opt_key")), Some(&7));
+    assert_eq!(parsed.opt_map.get(&None), Some(&0));
+}
+
+#[test]
+fn test_native_nbt_with_explicit_markers() {
+    use na_nbt::{BigEndian, CompoundOwn, TypedListOwn, Writable};
+
+    // Build native NBT including a List<Compound> whose first entry has an empty-string key ""
+    // (ensuring zero ambiguity with wrapped lists).
+    let mut root = CompoundOwn::<BigEndian>::default();
+    root.insert("bytes", [1i8, -2, 3, 127]);
+    let mut compounds = TypedListOwn::<BigEndian, na_nbt::tag::Compound>::default();
+    let mut c0 = CompoundOwn::<BigEndian>::default();
+    c0.insert("", 99i32);
+    c0.insert("k", 1i32);
+    compounds.push(c0);
+    root.insert("compounds", compounds);
+
+    let nbt_bytes = root.write_to_vec::<BigEndian>();
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct NativeTarget {
+        #[serde(with = "na_nbt::byte_array")]
+        bytes: Vec<i8>,
+        #[serde(with = "na_nbt::list")]
+        compounds: Vec<HashMap<String, i32>>,
+    }
+
+    let parsed: NativeTarget = from_slice_be(&nbt_bytes).unwrap();
+    assert_eq!(parsed.bytes, vec![1, -2, 3, 127]);
+    assert_eq!(parsed.compounds.len(), 1);
+    assert_eq!(parsed.compounds[0].get(""), Some(&99));
+    assert_eq!(parsed.compounds[0].get("k"), Some(&1));
+
+    // Unwrapped primitives/compounds must be rejected when deserializing Option<T>
+    let unwrapped_int = to_vec_be(&42i32).unwrap();
+    assert!(matches!(
+        from_slice_be::<Option<i32>>(&unwrapped_int),
+        Err(na_nbt::Error::MISMATCH { .. })
+    ));
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct NonEmpty {
+        a: i32,
+    }
+    let unwrapped_struct = to_vec_be(&NonEmpty { a: 1 }).unwrap();
+    assert!(from_slice_be::<Option<NonEmpty>>(&unwrapped_struct).is_err());
+}
+
+#[test]
+fn test_tuple_rejects_unconsumed_trailing_elements() {
+    // 3-element tuple serialized, deserialized as 2-element tuple must fail
+    let three = to_vec_be(&(1i32, 2i32, 3i32)).unwrap();
+    assert!(from_slice_be::<(i32, i32)>(&three).is_err());
+
+    // Corrupt list header claiming 100 elements while buffer only has 2 elements
+    let mut fake_len = to_vec_be(&(1i32, 2i32)).unwrap();
+    // Root List(9) + name ""(0, 0) + Compound(10) + u32 len at indices 4..8
+    fake_len[4..8].copy_from_slice(&100u32.to_be_bytes());
+    assert!(from_slice_be::<(i32, i32)>(&fake_len).is_err());
+}
+
+#[test]
+fn test_huge_lengths_no_oom_and_end_list_compat() {
+    // Non-empty TAG_End list fails immediately on element 0 when expecting i32 via na_nbt::list,
+    // and skips cleanly in O(1) inside ignored fields (matching read_borrowed/read_owned).
+    #[derive(Debug, Deserialize)]
+    struct EndListTarget {
+        #[serde(with = "na_nbt::list")]
+        #[allow(dead_code)]
+        items: Vec<i32>,
+    }
+    let compound_with_end_list = [
+        10u8, 0, 0, // root Compound ""
+        9, 0, 5, b'i', b't', b'e', b'm', b's', 0, 0, 0, 0, 5, // List "items": tag=End, len=5
+        0, // End
+    ];
+    assert!(matches!(
+        from_slice_be::<EndListTarget>(&compound_with_end_list),
+        Err(na_nbt::Error::MISMATCH { .. })
+    ));
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct EmptyStruct {}
+    assert_eq!(
+        from_slice_be::<EmptyStruct>(&compound_with_end_list).unwrap(),
+        EmptyStruct {}
+    );
+
+    // Truncated huge-length arrays/lists must return EOF immediately without OOM
+    #[derive(Debug, Deserialize)]
+    struct MarkerArrays {
+        #[serde(with = "na_nbt::int_array")]
+        #[allow(dead_code)]
+        ints: Vec<i32>,
+    }
+    let truncated_huge_int_array = [
+        10u8, 0, 0, // Compound ""
+        11, 0, 4, b'i', b'n', b't', b's', 0xFF, 0xFF, 0xFF, 0xFF, // IntArray len=u32::MAX
+        0,
+    ];
+    assert!(matches!(
+        from_slice_be::<MarkerArrays>(&truncated_huge_int_array),
+        Err(na_nbt::Error::EOF)
+    ));
+
+    #[derive(Debug, Deserialize)]
+    struct MarkerList {
+        #[serde(with = "na_nbt::list")]
+        #[allow(dead_code)]
+        items: Vec<i64>,
+    }
+    let truncated_huge_list = [
+        10u8, 0, 0, // Compound ""
+        9, 0, 5, b'i', b't', b'e', b'm', b's', 4, 0xFF, 0xFF, 0xFF, 0xFF, // List<Long> len=u32::MAX
+        0,
+    ];
+    assert!(matches!(
+        from_slice_be::<MarkerList>(&truncated_huge_list),
+        Err(na_nbt::Error::EOF)
+    ));
+}
+
+#[test]
+fn test_deeply_nested_compounds_no_artificial_limit() {
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct EmptyStruct {}
+
+    // 600 nested compounds (> 512) should succeed without an artificial depth restriction
+    let depth = 600;
+    let mut nested = vec![10u8, 0, 0]; // root Compound ""
+    for _ in 0..depth {
+        nested.extend_from_slice(&[10, 0, 1, b'a']); // Compound "a"
+    }
+    nested.resize(nested.len() + depth + 1, 0); // closing TAG_End bytes
+
+    assert_eq!(from_slice_be::<EmptyStruct>(&nested).unwrap(), EmptyStruct {});
+}
+
 #[test]
 fn test_max_u16_length_string_round_trip() {
     let max_str = "a".repeat(u16::MAX as usize);

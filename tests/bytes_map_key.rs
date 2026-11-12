@@ -137,3 +137,27 @@ fn test_serialization_only() {
     assert_eq!(deserialized.get(&ByteVec(b"test".to_vec())), Some(&1));
     assert_eq!(deserialized.get(&ByteVec(vec![0xFF, 0xFE])), Some(&2));
 }
+
+#[test]
+fn test_bytevec_as_root_and_field_values() {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct Packet {
+        payload: ByteVec,
+        empty: ByteVec,
+        by_key: HashMap<ByteVec, ByteVec>,
+    }
+
+    round_trip_both(&ByteVec(vec![]));
+    round_trip_both(&ByteVec(vec![0x00, 0x7F, 0x80, 0xFF]));
+
+    let mut by_key = HashMap::new();
+    by_key.insert(ByteVec(b"k1".to_vec()), ByteVec(vec![1, 2, 3, 4]));
+    by_key.insert(ByteVec(vec![0xFF, 0x00]), ByteVec(vec![]));
+
+    let packet = Packet {
+        payload: ByteVec((0..=255).collect()),
+        empty: ByteVec(vec![]),
+        by_key,
+    };
+    round_trip_both(&packet);
+}

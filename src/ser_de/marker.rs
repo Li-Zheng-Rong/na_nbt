@@ -17,6 +17,14 @@
 //! | [`long_array`] | TAG_Long_Array | `#[serde(with = "na_nbt::long_array")]` |
 //! | [`list`] | TAG_List | `#[serde(with = "na_nbt::list")]` |
 
+#[inline]
+fn cautious_capacity<T>(hint: Option<usize>) -> usize {
+    const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
+    MAX_PREALLOC_BYTES
+        .checked_div(std::mem::size_of::<T>())
+        .map_or(0, |max| hint.unwrap_or(0).min(max))
+}
+
 pub mod byte_array {
     //! Serializer and deserializer for NBT `TAG_Byte_Array`.
     //!
@@ -70,6 +78,16 @@ pub mod byte_array {
             // SAFETY: i8 and u8 have the same memory representation and alignment.
             // The transmute effectively reinterprets the signedness of the bytes.
             Ok(unsafe { slice::from_raw_parts(v.as_ptr() as *const i8, v.len()).to_vec() })
+        }
+
+        /// Visits an owned byte buffer and reinterprets it as `Vec<i8>` without copying.
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let mut v = std::mem::ManuallyDrop::new(v);
+            // SAFETY: u8 and i8 have identical size (1) and alignment (1).
+            Ok(unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut i8, v.len(), v.capacity()) })
         }
     }
 
@@ -176,7 +194,7 @@ pub mod int_array {
         where
             A: SeqAccess<'de>,
         {
-            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            let mut vec = Vec::with_capacity(super::cautious_capacity::<T>(seq.size_hint()));
             while let Some(item) = seq.next_element::<i32>()? {
                 // Convert each i32 to the target type. The From trait is infallible.
                 vec.push(item.into());
@@ -289,7 +307,7 @@ pub mod long_array {
         where
             A: SeqAccess<'de>,
         {
-            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            let mut vec = Vec::with_capacity(super::cautious_capacity::<T>(seq.size_hint()));
             while let Some(item) = seq.next_element::<i64>()? {
                 // Convert each i64 to the target type. The From trait is infallible.
                 vec.push(item.into());
@@ -403,7 +421,7 @@ pub mod list {
         where
             A: SeqAccess<'de>,
         {
-            let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            let mut vec = Vec::with_capacity(super::cautious_capacity::<T>(seq.size_hint()));
             while let Some(item) = seq.next_element()? {
                 vec.push(item);
             }
