@@ -17,7 +17,7 @@ mod value_own;
 mod value_ref;
 mod write;
 
-use std::{any::TypeId, io::Read};
+use std::io::Read;
 
 pub use compound_own::CompoundOwn;
 pub use into_nbt::IntoNBT;
@@ -26,10 +26,7 @@ pub use typed_list_own::TypedListOwn;
 pub use value_own::ValueOwn;
 use zerocopy::byteorder;
 
-use crate::{
-    ByteOrder, Error, Result, cold_path,
-    mutable::read::{read_unsafe, read_unsafe_fallback},
-};
+use crate::{ByteOrder, Error, Result, cold_path, mutable::read::read_unsafe};
 
 pub fn read_owned<SOURCE: ByteOrder, STORE: ByteOrder>(source: &[u8]) -> Result<ValueOwn<STORE>> {
     unsafe {
@@ -61,11 +58,7 @@ pub fn read_owned<SOURCE: ByteOrder, STORE: ByteOrder>(source: &[u8]) -> Result<
         check_bounds!(1 + 2 + name_len as usize);
         current_pos = current_pos.add(2 + name_len as usize);
 
-        let value = if TypeId::of::<SOURCE>() == TypeId::of::<STORE>() {
-            read_unsafe::<STORE>(tag_id, &mut current_pos, end_pos)?
-        } else {
-            read_unsafe_fallback::<SOURCE, STORE>(tag_id, &mut current_pos, end_pos)?
-        };
+        let value = read_unsafe::<SOURCE, STORE>(tag_id, &mut current_pos, end_pos)?;
 
         if current_pos < end_pos {
             cold_path();
