@@ -12,7 +12,7 @@ use serde::{
 };
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, Result, TagID, cold_path};
+use crate::{ByteOrder, Error, Result, TagID, cold_path, decode_mutf8_lossy};
 
 /// Deserializes a value from a byte slice in NBT format.
 ///
@@ -219,7 +219,7 @@ impl<'de, O: ByteOrder> Deserializer<'de, O> {
         check_bounds!(2, self.input);
         let length = byteorder::U16::<O>::from_bytes(unsafe { *self.input.as_ptr().cast() }).get();
         check_bounds!(2 + length as usize, self.input);
-        let value = simd_cesu8::mutf8::decode_lossy(&self.input[2..2 + length as usize]);
+        let value = decode_mutf8_lossy(&self.input[2..2 + length as usize]);
         self.input = &self.input[2 + length as usize..];
         Ok(value)
     }

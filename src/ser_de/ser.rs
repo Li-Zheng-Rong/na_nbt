@@ -4,7 +4,7 @@ use base64ct::Encoding;
 use serde::{ser, Serialize};
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, Result, TagID, cold_path, tag_of};
+use crate::{ByteOrder, Error, Result, TagID, cold_path, encode_mutf8, tag_of};
 
 /// Serializes a value to a byte vector in NBT format.
 ///
@@ -122,7 +122,7 @@ impl<O: ByteOrder> Serializer<O> {
         T: ?Sized + Serialize,
     {
         let tag_id = tag_of(value);
-        let encoded = simd_cesu8::mutf8::encode(name);
+        let encoded = encode_mutf8(name);
         self.write_compound_header(tag_id, &encoded)?;
         value.serialize(&mut *self)
     }
@@ -316,7 +316,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
 
     // String
     fn serialize_str(self, v: &str) -> Result<Self::Ok> {
-        let encoded = simd_cesu8::mutf8::encode(v);
+        let encoded = encode_mutf8(v);
         self.write_string(&encoded)
     }
 
@@ -479,7 +479,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        let encoded = simd_cesu8::mutf8::encode(variant);
+        let encoded = encode_mutf8(variant);
         let name_len = encoded.len();
         unsafe {
             let old_len = self.vec.len();
@@ -523,7 +523,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        let encoded = simd_cesu8::mutf8::encode(variant);
+        let encoded = encode_mutf8(variant);
         self.write_compound_header(TagID::Compound, &encoded)?;
         Ok(&mut *self)
     }
@@ -852,7 +852,7 @@ impl<'a, O: ByteOrder> KeySerializer<'a, O> {
     where
         T: ?Sized + Serialize,
     {
-        let encoded = simd_cesu8::mutf8::encode(name);
+        let encoded = encode_mutf8(name);
         let encoded_len = encoded.len();
 
         let pos = self.serializer.vec.len();
@@ -914,7 +914,7 @@ impl<'a, O: ByteOrder> ser::Serializer for KeySerializer<'a, O> {
     }
 
     fn serialize_str(self, v: &str) -> Result<Self::Ok> {
-        let encoded = simd_cesu8::mutf8::encode(v);
+        let encoded = encode_mutf8(v);
         self.serializer.write_compound_header(self.tag_id, &encoded)
     }
 
