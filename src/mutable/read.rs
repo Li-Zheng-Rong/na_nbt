@@ -1,11 +1,118 @@
-use std::{hint::assert_unchecked, marker::PhantomData, mem::ManuallyDrop, ptr, slice};
+use std::{
+    hint::assert_unchecked,
+    marker::PhantomData,
+    mem::{ManuallyDrop, MaybeUninit},
+    ptr, slice,
+};
 
 use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, CompoundOwn, Error, ListOwn, Result, StringOwn, TagID, ValueOwn, VecOwn, cold_path,
+    immutable::size::tag_elem_size,
     mutable::size::{SIZE_DYN, mutable_tag_size},
 };
+
+struct CompoundBuildGuard<O: ByteOrder> {
+    data: ManuallyDrop<Vec<u8>>,
+    _marker: PhantomData<O>,
+}
+
+impl<O: ByteOrder> CompoundBuildGuard<O> {
+    #[inline(always)]
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            data: ManuallyDrop::new(Vec::with_capacity(cap)),
+            _marker: PhantomData,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn reserve_slow(&mut self, need: usize) {
+        self.data.reserve(need);
+    }
+
+    #[inline(always)]
+    unsafe fn finish(mut self, start: *const u8, end: *const u8) -> CompoundOwn<O> {
+        let raw_len = (end as usize) - (start as usize);
+        let old_len = self.data.len();
+        if self.data.capacity() - old_len < raw_len {
+            self.reserve_slow(raw_len);
+        }
+        let vec = unsafe {
+            let dst = self.data.as_mut_ptr().add(old_len);
+            if raw_len == 1 {
+                dst.write(0);
+            } else {
+                ptr::copy_nonoverlapping(start, dst, raw_len);
+            }
+            self.data.set_len(old_len + raw_len);
+            let v = ManuallyDrop::take(&mut self.data);
+            std::mem::forget(self);
+            v
+        };
+        CompoundOwn {
+            data: vec.into(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    fn finish_fallback(mut self) -> CompoundOwn<O> {
+        let old_len = self.data.len();
+        if self.data.capacity() == old_len {
+            self.reserve_slow(1);
+        }
+        let vec = unsafe {
+            self.data.as_mut_ptr().add(old_len).write(0);
+            self.data.set_len(old_len + 1);
+            let v = ManuallyDrop::take(&mut self.data);
+            std::mem::forget(self);
+            v
+        };
+        CompoundOwn {
+            data: vec.into(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<O: ByteOrder> Drop for CompoundBuildGuard<O> {
+    #[cold]
+    fn drop(&mut self) {
+        unsafe {
+            let mut ptr = self.data.as_mut_ptr();
+            let end = ptr.add(self.data.len());
+            while ptr < end {
+                let tag_id = TagID::from_u8_unchecked(*ptr);
+                let name_len = byteorder::U16::<O>::from_bytes(*ptr.add(1).cast()).get() as usize;
+                ptr = ptr.add(3 + name_len);
+                match tag_id {
+                    TagID::ByteArray => drop(ptr::read(ptr.cast::<VecOwn<i8>>())),
+                    TagID::String => drop(ptr::read(ptr.cast::<StringOwn>())),
+                    TagID::List => drop(ptr::read(ptr.cast::<ListOwn<O>>())),
+                    TagID::Compound => drop(ptr::read(ptr.cast::<CompoundOwn<O>>())),
+                    TagID::IntArray => drop(ptr::read(ptr.cast::<VecOwn<byteorder::I32<O>>>())),
+                    TagID::LongArray => drop(ptr::read(ptr.cast::<VecOwn<byteorder::I64<O>>>())),
+                    _ => {}
+                }
+                ptr = ptr.add(mutable_tag_size(tag_id));
+            }
+            ManuallyDrop::drop(&mut self.data);
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn drop_dyn_slice<T>(mut ptr: *mut u8, count: usize) {
+    for _ in 0..count {
+        unsafe {
+            drop(ptr::read(ptr.cast::<T>()));
+            ptr = ptr.add(SIZE_DYN);
+        }
+    }
+}
 
 struct ListBuildGuard<O: ByteOrder> {
     data: ManuallyDrop<Vec<u8>>,
@@ -14,6 +121,7 @@ struct ListBuildGuard<O: ByteOrder> {
 }
 
 impl<O: ByteOrder> ListBuildGuard<O> {
+    #[inline(always)]
     unsafe fn new(data: Vec<u8>, tag_id: u8) -> Self {
         Self {
             data: ManuallyDrop::new(data),
@@ -22,6 +130,7 @@ impl<O: ByteOrder> ListBuildGuard<O> {
         }
     }
 
+    #[inline(always)]
     unsafe fn finalize(mut self) -> Vec<u8> {
         unsafe {
             let data = ManuallyDrop::take(&mut self.data);
@@ -32,56 +141,24 @@ impl<O: ByteOrder> ListBuildGuard<O> {
 }
 
 impl<O: ByteOrder> Drop for ListBuildGuard<O> {
+    #[cold]
     fn drop(&mut self) {
         let count = self.data.len().saturating_sub(5) / SIZE_DYN;
-        if count == 0 {
-            unsafe { ManuallyDrop::drop(&mut self.data) };
-            return;
-        }
-
-        unsafe {
-            let mut ptr = self.data.as_mut_ptr().add(5);
-            match self.tag_id {
-                7 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<VecOwn<i8>>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
+        if count > 0 {
+            unsafe {
+                let ptr = self.data.as_mut_ptr().add(5);
+                match self.tag_id {
+                    7 => drop_dyn_slice::<VecOwn<i8>>(ptr, count),
+                    8 => drop_dyn_slice::<StringOwn>(ptr, count),
+                    9 => drop_dyn_slice::<ListOwn<O>>(ptr, count),
+                    10 => drop_dyn_slice::<CompoundOwn<O>>(ptr, count),
+                    11 => drop_dyn_slice::<VecOwn<byteorder::I32<O>>>(ptr, count),
+                    12 => drop_dyn_slice::<VecOwn<byteorder::I64<O>>>(ptr, count),
+                    _ => {}
                 }
-                8 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<StringOwn>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
-                }
-                9 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<ListOwn<O>>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
-                }
-                10 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<CompoundOwn<O>>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
-                }
-                11 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I32<O>>>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
-                }
-                12 => {
-                    for _ in 0..count {
-                        ptr::read(ptr.cast::<VecOwn<byteorder::I64<O>>>());
-                        ptr = ptr.add(SIZE_DYN);
-                    }
-                }
-                _ => {}
             }
-            ManuallyDrop::drop(&mut self.data);
         }
+        unsafe { ManuallyDrop::drop(&mut self.data) };
     }
 }
 
@@ -91,133 +168,168 @@ macro_rules! change_endian {
     };
 }
 
+#[inline(always)]
+fn check_rem(rem: usize, need: usize) -> Result<()> {
+    if rem < need {
+        cold_path();
+        return Err(Error::EOF);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+unsafe fn read_u16_str_slice<'a, O: ByteOrder>(
+    pos: *const u8,
+    rem: usize,
+) -> Result<(&'a [u8], *const u8)> {
+    check_rem(rem, 2)?;
+    let len = unsafe { byteorder::U16::<O>::from_bytes(*pos.cast()).get() } as usize;
+    check_rem(rem, 2 + len)?;
+    unsafe { Ok((slice::from_raw_parts(pos.add(2), len), pos.add(2 + len))) }
+}
+
+#[inline(always)]
+unsafe fn read_u32_array_bytes<O: ByteOrder>(
+    pos: *const u8,
+    rem: usize,
+    elem_size: usize,
+) -> Result<(usize, usize)> {
+    check_rem(rem, 4)?;
+    let len = unsafe { byteorder::U32::<O>::from_bytes(*pos.cast()).get() } as usize;
+    let Some(bytes) = len.checked_mul(elem_size) else {
+        cold_path();
+        return Err(Error::EOF);
+    };
+    check_rem(rem - 4, bytes)?;
+    Ok((len, bytes))
+}
+
+#[inline]
+unsafe fn read_swapped_i32_vec<O: ByteOrder, R: ByteOrder>(
+    src: *const u8,
+    len: usize,
+) -> Vec<byteorder::I32<R>> {
+    let mut out = Vec::<byteorder::I32<R>>::with_capacity(len);
+    unsafe {
+        let src_slice = slice::from_raw_parts(src.cast::<[u8; 4]>(), len);
+        let dst_slice =
+            slice::from_raw_parts_mut(out.as_mut_ptr().cast::<MaybeUninit<[u8; 4]>>(), len);
+        for (dst, &bytes) in dst_slice.iter_mut().zip(src_slice) {
+            dst.write(change_endian!(bytes, U32, O, R).to_bytes());
+        }
+        out.set_len(len);
+    }
+    out
+}
+
+#[inline]
+unsafe fn read_swapped_i64_vec<O: ByteOrder, R: ByteOrder>(
+    src: *const u8,
+    len: usize,
+) -> Vec<byteorder::I64<R>> {
+    let mut out = Vec::<byteorder::I64<R>>::with_capacity(len);
+    unsafe {
+        ptr::copy_nonoverlapping(src, out.as_mut_ptr().cast::<u8>(), len * 8);
+        out.set_len(len);
+    }
+    for elem in out.iter_mut() {
+        *elem = change_endian!(elem.to_bytes(), I64, O, R);
+    }
+    out
+}
+
 unsafe fn read_compound<O: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<CompoundOwn<O>> {
-    let mut comp = CompoundOwn {
-        data: Vec::<u8>::with_capacity(128).into(),
-        _marker: PhantomData,
-    };
-
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
-                cold_path();
-                comp.data.push(0);
-                return Err(Error::EOF);
-            }
-        };
-    }
+    let mut guard = CompoundBuildGuard::<O>::with_capacity(128);
 
     unsafe {
-        let mut start = *current_pos;
+        let mut pos = *current_pos;
+        let mut start = pos;
 
         loop {
-            check_bounds!(1);
-            let tag_id = **current_pos;
-            *current_pos = current_pos.add(1);
+            let rem = (end_pos as usize) - (pos as usize);
+            check_rem(rem, 1)?;
 
+            let tag_id = *pos;
             if tag_id == 0 {
-                cold_path();
-                let raw_len = current_pos.byte_offset_from_unsigned(start);
-                if raw_len == 1 {
-                    comp.data.push(0);
-                } else {
-                    let len = comp.data.len();
-                    comp.data.reserve(raw_len);
-                    let write_ptr = comp.data.as_mut_ptr().add(len);
-                    ptr::copy_nonoverlapping(start, write_ptr, raw_len);
-                    comp.data.set_len(len + raw_len);
-                }
-                return Ok(comp);
+                pos = pos.add(1);
+                *current_pos = pos;
+                return Ok(guard.finish(start, pos));
             }
 
-            check_bounds!(2);
-            let name_len = byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-            *current_pos = current_pos.add(2);
-            check_bounds!(name_len);
-            *current_pos = current_pos.add(name_len);
+            check_rem(rem, 3)?;
+            let name_len = byteorder::U16::<O>::from_bytes(*pos.add(1).cast()).get() as usize;
+            let hdr = 3 + name_len;
+            check_rem(rem, hdr)?;
+            let rem_val = rem - hdr;
 
             if tag_id <= 6 {
-                let size = mutable_tag_size(TagID::from_u8_unchecked(tag_id));
-                check_bounds!(size);
-                *current_pos = current_pos.add(size);
-            } else {
-                let raw_len = current_pos.byte_offset_from_unsigned(start);
-                let len = comp.data.len();
-                comp.data.reserve(raw_len + SIZE_DYN);
-                let write_ptr = comp.data.as_mut_ptr().add(len);
-                ptr::copy_nonoverlapping(start, write_ptr, raw_len);
-                let write_ptr = write_ptr.add(raw_len);
-                match tag_id {
-                    7 => {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len);
-                        let value: &[i8] = slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len);
-                        ptr::write(write_ptr.cast::<VecOwn<i8>>(), value.into());
-                    }
-                    8 => {
-                        check_bounds!(2);
-                        let str_len =
-                            byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(2);
-                        check_bounds!(str_len);
-                        let value = slice::from_raw_parts((*current_pos).cast(), str_len);
-                        *current_pos = current_pos.add(str_len);
-                        ptr::write(write_ptr.cast::<StringOwn>(), value.into());
-                    }
-                    9 => match read_list::<O>(current_pos, end_pos) {
-                        Ok(list) => ptr::write(write_ptr.cast::<ListOwn<O>>(), list),
-                        Err(error) => {
-                            cold_path();
-                            comp.data.push(0);
-                            return Err(error);
-                        }
-                    },
-                    10 => match read_compound::<O>(current_pos, end_pos) {
-                        Ok(compound) => ptr::write(write_ptr.cast::<CompoundOwn<O>>(), compound),
-                        Err(error) => {
-                            cold_path();
-                            comp.data.push(0);
-                            return Err(error);
-                        }
-                    },
-                    11 => {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len * 4);
-                        let value: &[byteorder::I32<O>] =
-                            slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len * 4);
-                        ptr::write(write_ptr.cast::<VecOwn<byteorder::I32<O>>>(), value.into());
-                    }
-                    12 => {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len * 8);
-                        let value: &[byteorder::I64<O>] =
-                            slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len * 8);
-                        ptr::write(write_ptr.cast::<VecOwn<byteorder::I64<O>>>(), value.into());
-                    }
-                    _ => {
-                        cold_path();
-                        comp.data.push(0);
-                        return Err(Error::INVALID(tag_id));
-                    }
-                }
-                comp.data.set_len(len + raw_len + SIZE_DYN);
-                start = *current_pos;
+                let size = tag_elem_size(tag_id);
+                check_rem(rem_val, size)?;
+                pos = pos.add(hdr + size);
+                continue;
             }
+
+            if tag_id > 12 {
+                cold_path();
+                return Err(Error::INVALID(tag_id));
+            }
+
+            let hdr_end = pos.add(hdr);
+            let raw_len = (hdr_end as usize) - (start as usize);
+            let old_len = guard.data.len();
+            if guard.data.capacity() - old_len < raw_len + SIZE_DYN + 1 {
+                guard.reserve_slow(raw_len + SIZE_DYN + 1);
+            }
+            let write_ptr = guard.data.as_mut_ptr().add(old_len);
+            ptr::copy_nonoverlapping(start, write_ptr, raw_len);
+            let val_dst = write_ptr.add(raw_len);
+
+            match tag_id {
+                7 => {
+                    let (len, bytes) = read_u32_array_bytes::<O>(hdr_end, rem_val, 1)?;
+                    let val: VecOwn<i8> =
+                        slice::from_raw_parts(hdr_end.add(4).cast::<i8>(), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<i8>>(), val);
+                    pos = hdr_end.add(4 + bytes);
+                }
+                8 => {
+                    let (s, next) = read_u16_str_slice::<O>(hdr_end, rem_val)?;
+                    ptr::write(val_dst.cast::<StringOwn>(), s.into());
+                    pos = next;
+                }
+                9 => {
+                    *current_pos = hdr_end;
+                    let child = read_list::<O>(current_pos, end_pos)?;
+                    ptr::write(val_dst.cast::<ListOwn<O>>(), child);
+                    pos = *current_pos;
+                }
+                10 => {
+                    *current_pos = hdr_end;
+                    let child = read_compound::<O>(current_pos, end_pos)?;
+                    ptr::write(val_dst.cast::<CompoundOwn<O>>(), child);
+                    pos = *current_pos;
+                }
+                11 => {
+                    let (len, bytes) = read_u32_array_bytes::<O>(hdr_end, rem_val, 4)?;
+                    let val: VecOwn<byteorder::I32<O>> =
+                        slice::from_raw_parts(hdr_end.add(4).cast(), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<byteorder::I32<O>>>(), val);
+                    pos = hdr_end.add(4 + bytes);
+                }
+                12 => {
+                    let (len, bytes) = read_u32_array_bytes::<O>(hdr_end, rem_val, 8)?;
+                    let val: VecOwn<byteorder::I64<O>> =
+                        slice::from_raw_parts(hdr_end.add(4).cast(), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<byteorder::I64<O>>>(), val);
+                    pos = hdr_end.add(4 + bytes);
+                }
+                _ => core::hint::unreachable_unchecked(),
+            }
+            guard.data.set_len(old_len + raw_len + SIZE_DYN);
+            start = pos;
         }
     }
 }
@@ -226,235 +338,193 @@ unsafe fn read_list<O: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<ListOwn<O>> {
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
+    unsafe {
+        let list_start = *current_pos;
+        let rem = (end_pos as usize) - (list_start as usize);
+        check_rem(rem, 5)?;
+        let tag_id = *list_start;
+        let len = byteorder::U32::<O>::from_bytes(*list_start.add(1).cast()).get() as usize;
+        let mut pos = list_start.add(5);
+        let rem_after = rem - 5;
+
+        if tag_id <= 6 {
+            let Some(bytes) = len.checked_mul(tag_elem_size(tag_id)) else {
                 cold_path();
                 return Err(Error::EOF);
-            }
-        };
-    }
-
-    unsafe {
-        check_bounds!(1 + 4);
-        let tag_id = **current_pos;
-        *current_pos = current_pos.add(1);
-        let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-        *current_pos = current_pos.add(4);
-        if tag_id <= 6 {
-            let size = mutable_tag_size(TagID::from_u8_unchecked(tag_id));
-            check_bounds!(len * size);
-            let value = slice::from_raw_parts((*current_pos).sub(1 + 4).cast(), len * size + 1 + 4);
-            *current_pos = current_pos.add(len * size);
-            Ok(ListOwn {
+            };
+            check_rem(rem_after, bytes)?;
+            let value = slice::from_raw_parts(list_start, 5 + bytes);
+            *current_pos = pos.add(bytes);
+            return Ok(ListOwn {
                 data: value.into(),
                 _marker: PhantomData,
-            })
-        } else {
-            check_bounds!(len); // one non-primitive tag is at least 1 byte (empty Tag::Compound)
-            let mut guard: ListBuildGuard<O> =
-                ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-            let list_data = &mut guard.data;
-            ptr::copy_nonoverlapping((*current_pos).sub(1 + 4), list_data.as_mut_ptr(), 1 + 4);
-            list_data.set_len(5);
-            let mut write_ptr = list_data.as_mut_ptr().add(5);
-            match tag_id {
-                7 => {
-                    for _ in 0..len {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len);
-                        let value: &[i8] = slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len);
-                        ptr::write(write_ptr.cast::<VecOwn<i8>>(), value.into());
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                8 => {
-                    for _ in 0..len {
-                        check_bounds!(2);
-                        let str_len =
-                            byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(2);
-                        check_bounds!(str_len);
-                        let value = slice::from_raw_parts((*current_pos).cast(), str_len);
-                        *current_pos = current_pos.add(str_len);
-                        ptr::write(write_ptr.cast::<StringOwn>(), value.into());
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                9 => {
-                    for _ in 0..len {
-                        ptr::write(
-                            write_ptr.cast::<ListOwn<O>>(),
-                            read_list::<O>(current_pos, end_pos)?,
-                        );
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                10 => {
-                    for _ in 0..len {
-                        ptr::write(
-                            write_ptr.cast::<CompoundOwn<O>>(),
-                            read_compound::<O>(current_pos, end_pos)?,
-                        );
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                11 => {
-                    for _ in 0..len {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len * 4);
-                        let value: &[byteorder::I32<O>] =
-                            slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len * 4);
-                        ptr::write(write_ptr.cast::<VecOwn<byteorder::I32<O>>>(), value.into());
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                12 => {
-                    for _ in 0..len {
-                        check_bounds!(4);
-                        let arr_len =
-                            byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                        *current_pos = current_pos.add(4);
-                        check_bounds!(arr_len * 8);
-                        let value: &[byteorder::I64<O>] =
-                            slice::from_raw_parts((*current_pos).cast(), arr_len);
-                        *current_pos = current_pos.add(arr_len * 8);
-                        ptr::write(write_ptr.cast::<VecOwn<byteorder::I64<O>>>(), value.into());
-                        write_ptr = write_ptr.add(SIZE_DYN);
-                        let len = list_data.len();
-                        list_data.set_len(len + SIZE_DYN);
-                    }
-                }
-                _ => {
-                    cold_path();
-                    return Err(Error::INVALID(tag_id));
-                }
-            }
-            Ok(ListOwn {
-                data: guard.finalize().into(),
-                _marker: PhantomData,
-            })
+            });
         }
+
+        if tag_id > 12 {
+            cold_path();
+            return Err(Error::INVALID(tag_id));
+        }
+
+        if len == 0 {
+            let value = slice::from_raw_parts(list_start, 5);
+            *current_pos = pos;
+            return Ok(ListOwn {
+                data: value.into(),
+                _marker: PhantomData,
+            });
+        }
+
+        let min_elem = match tag_id {
+            8 => 2,
+            9 => 5,
+            10 => 1,
+            _ => 4,
+        };
+        if len.checked_mul(min_elem).is_none_or(|min| rem_after < min) {
+            cold_path();
+            return Err(Error::EOF);
+        }
+        let Some(dyn_bytes) = len.checked_mul(SIZE_DYN) else {
+            cold_path();
+            return Err(Error::EOF);
+        };
+
+        let mut guard: ListBuildGuard<O> =
+            ListBuildGuard::new(Vec::with_capacity(5 + dyn_bytes), tag_id);
+        let list_data = &mut guard.data;
+        ptr::copy_nonoverlapping(list_start, list_data.as_mut_ptr(), 5);
+        list_data.set_len(5);
+        let mut write_ptr = list_data.as_mut_ptr().add(5);
+
+        macro_rules! push_elems {
+            ($ty:ty, $read_elem:expr) => {{
+                for _ in 0..len {
+                    let val: $ty = $read_elem;
+                    ptr::write(write_ptr.cast::<$ty>(), val);
+                    write_ptr = write_ptr.add(SIZE_DYN);
+                    let cur_len = list_data.len();
+                    list_data.set_len(cur_len + SIZE_DYN);
+                }
+            }};
+        }
+
+        match tag_id {
+            7 => push_elems!(VecOwn<i8>, {
+                let rem_now = (end_pos as usize) - (pos as usize);
+                let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 1)?;
+                let v = slice::from_raw_parts(pos.add(4).cast::<i8>(), n).into();
+                pos = pos.add(4 + b);
+                v
+            }),
+            8 => push_elems!(StringOwn, {
+                let rem_now = (end_pos as usize) - (pos as usize);
+                let (s, next) = read_u16_str_slice::<O>(pos, rem_now)?;
+                pos = next;
+                s.into()
+            }),
+            9 => {
+                *current_pos = pos;
+                push_elems!(ListOwn<O>, read_list::<O>(current_pos, end_pos)?);
+                pos = *current_pos;
+            }
+            10 => {
+                *current_pos = pos;
+                push_elems!(CompoundOwn<O>, read_compound::<O>(current_pos, end_pos)?);
+                pos = *current_pos;
+            }
+            11 => push_elems!(VecOwn<byteorder::I32<O>>, {
+                let rem_now = (end_pos as usize) - (pos as usize);
+                let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 4)?;
+                let v = slice::from_raw_parts(pos.add(4).cast(), n).into();
+                pos = pos.add(4 + b);
+                v
+            }),
+            12 => push_elems!(VecOwn<byteorder::I64<O>>, {
+                let rem_now = (end_pos as usize) - (pos as usize);
+                let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 8)?;
+                let v = slice::from_raw_parts(pos.add(4).cast(), n).into();
+                pos = pos.add(4 + b);
+                v
+            }),
+            _ => unreachable!(),
+        }
+        *current_pos = pos;
+        Ok(ListOwn {
+            data: guard.finalize().into(),
+            _marker: PhantomData,
+        })
     }
 }
 
-/// .
-///
-/// # Errors
-///
-/// This function will return an error if .
-///
-/// # Safety
-///
-/// .
 pub unsafe fn read_unsafe<O: ByteOrder>(
     tag_id: u8,
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<ValueOwn<O>> {
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
-                cold_path();
-                return Err(Error::EOF);
-            }
-        };
-    }
+    let pos = *current_pos;
+    let rem = (end_pos as usize) - (pos as usize);
 
     unsafe {
         assert_unchecked(tag_id != 0);
         match tag_id {
             1 => {
-                check_bounds!(1);
-                let value = *(*current_pos).cast();
-                *current_pos = current_pos.add(1);
-                Ok(ValueOwn::Byte(value))
+                check_rem(rem, 1)?;
+                *current_pos = pos.add(1);
+                Ok(ValueOwn::Byte(*pos.cast()))
             }
             2 => {
-                check_bounds!(2);
-                let value = byteorder::I16::<O>::from_bytes(*(*current_pos).cast());
-                *current_pos = current_pos.add(2);
-                Ok(ValueOwn::Short(value))
+                check_rem(rem, 2)?;
+                *current_pos = pos.add(2);
+                Ok(ValueOwn::Short(byteorder::I16::<O>::from_bytes(*pos.cast())))
             }
             3 => {
-                check_bounds!(4);
-                let value = byteorder::I32::<O>::from_bytes(*(*current_pos).cast());
-                *current_pos = current_pos.add(4);
-                Ok(ValueOwn::Int(value))
+                check_rem(rem, 4)?;
+                *current_pos = pos.add(4);
+                Ok(ValueOwn::Int(byteorder::I32::<O>::from_bytes(*pos.cast())))
             }
             4 => {
-                check_bounds!(8);
-                let value = byteorder::I64::<O>::from_bytes(*(*current_pos).cast());
-                *current_pos = current_pos.add(8);
-                Ok(ValueOwn::Long(value))
+                check_rem(rem, 8)?;
+                *current_pos = pos.add(8);
+                Ok(ValueOwn::Long(byteorder::I64::<O>::from_bytes(*pos.cast())))
             }
             5 => {
-                check_bounds!(4);
-                let value = byteorder::F32::<O>::from_bytes(*(*current_pos).cast());
-                *current_pos = current_pos.add(4);
-                Ok(ValueOwn::Float(value))
+                check_rem(rem, 4)?;
+                *current_pos = pos.add(4);
+                Ok(ValueOwn::Float(byteorder::F32::<O>::from_bytes(*pos.cast())))
             }
             6 => {
-                check_bounds!(8);
-                let value = byteorder::F64::<O>::from_bytes(*(*current_pos).cast());
-                *current_pos = current_pos.add(8);
-                Ok(ValueOwn::Double(value))
+                check_rem(rem, 8)?;
+                *current_pos = pos.add(8);
+                Ok(ValueOwn::Double(byteorder::F64::<O>::from_bytes(*pos.cast())))
             }
             7 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len);
-                let value: &[i8] = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len);
-                Ok(ValueOwn::ByteArray(value.into()))
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 1)?;
+                *current_pos = pos.add(4 + bytes);
+                Ok(ValueOwn::ByteArray(
+                    slice::from_raw_parts(pos.add(4).cast::<i8>(), len).into(),
+                ))
             }
             8 => {
-                check_bounds!(2);
-                let len = byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(2);
-                check_bounds!(len);
-                let value = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len);
-                Ok(ValueOwn::String(value.into()))
+                let (s, next) = read_u16_str_slice::<O>(pos, rem)?;
+                *current_pos = next;
+                Ok(ValueOwn::String(s.into()))
             }
             9 => Ok(read_list::<O>(current_pos, end_pos)?.into()),
             10 => Ok(read_compound::<O>(current_pos, end_pos)?.into()),
             11 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len * 4);
-                let value: &[byteorder::I32<O>] = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len * 4);
-                Ok(ValueOwn::IntArray(value.into()))
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 4)?;
+                *current_pos = pos.add(4 + bytes);
+                Ok(ValueOwn::IntArray(
+                    slice::from_raw_parts(pos.add(4).cast(), len).into(),
+                ))
             }
             12 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len * 8);
-                let value: &[byteorder::I64<O>] = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len * 8);
-                Ok(ValueOwn::LongArray(value.into()))
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 8)?;
+                *current_pos = pos.add(4 + bytes);
+                Ok(ValueOwn::LongArray(
+                    slice::from_raw_parts(pos.add(4).cast(), len).into(),
+                ))
             }
             _ => {
                 cold_path();
@@ -468,217 +538,120 @@ unsafe fn read_compound_fallback<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<CompoundOwn<R>> {
-    let mut comp = CompoundOwn {
-        data: Vec::<u8>::with_capacity(128).into(),
-        _marker: PhantomData,
-    };
-
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
-                cold_path();
-                comp.data.push(0);
-                return Err(Error::EOF);
-            }
-        };
-    }
+    let mut guard = CompoundBuildGuard::<R>::with_capacity(128);
 
     unsafe {
+        let mut pos = *current_pos;
+
         loop {
-            check_bounds!(1);
-            let tag_id = **current_pos;
-            let start = *current_pos;
-            *current_pos = current_pos.add(1);
+            let rem = (end_pos as usize) - (pos as usize);
+            check_rem(rem, 1)?;
 
+            let hdr_start = pos;
+            let tag_id = *pos;
             if tag_id == 0 {
+                *current_pos = pos.add(1);
+                return Ok(guard.finish_fallback());
+            }
+
+            check_rem(rem, 3)?;
+            let name_len = byteorder::U16::<O>::from_bytes(*pos.add(1).cast()).get() as usize;
+            let header_len = 3 + name_len;
+            check_rem(rem, header_len)?;
+            let val_pos = pos.add(header_len);
+            let rem_val = rem - header_len;
+
+            if tag_id <= 6 {
+                macro_rules! prim_case {
+                    ($size:expr, $write_val:expr) => {{
+                        check_rem(rem_val, $size)?;
+                        let old_len = guard.data.len();
+                        let need = header_len + $size;
+                        if guard.data.capacity() - old_len < need + 1 {
+                            guard.reserve_slow(need + 1);
+                        }
+                        let dst = guard.data.as_mut_ptr().add(old_len);
+                        ptr::copy_nonoverlapping(hdr_start, dst, header_len);
+                        ptr::write(
+                            dst.add(1).cast(),
+                            byteorder::U16::<R>::new(name_len as u16).to_bytes(),
+                        );
+                        ptr::write(dst.add(header_len).cast(), $write_val);
+                        guard.data.set_len(old_len + need);
+                        pos = val_pos.add($size);
+                    }};
+                }
+
+                match tag_id {
+                    1 => prim_case!(1, *val_pos),
+                    2 => prim_case!(2, change_endian!(*val_pos.cast(), U16, O, R).to_bytes()),
+                    3 | 5 => prim_case!(4, change_endian!(*val_pos.cast(), U32, O, R).to_bytes()),
+                    4 | 6 => prim_case!(8, change_endian!(*val_pos.cast(), U64, O, R).to_bytes()),
+                    _ => core::hint::unreachable_unchecked(),
+                }
+                continue;
+            }
+
+            if tag_id > 12 {
                 cold_path();
-                comp.data.push(0);
-                return Ok(comp);
+                return Err(Error::INVALID(tag_id));
             }
 
-            check_bounds!(2);
-            let name_len = byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-            *current_pos = current_pos.add(2);
-            check_bounds!(name_len);
-            *current_pos = current_pos.add(name_len);
-
-            assert_unchecked(tag_id != 0);
-
-            let header_len = 1 + 2 + name_len;
-            let old_len = comp.data.len();
-
-            macro_rules! case {
-                ($size:expr, $type:ident) => {{
-                    comp.data.reserve(header_len + $size);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    check_bounds!($size);
-                    ptr::write(
-                        write_ptr.add(header_len).cast(),
-                        change_endian!(*(*current_pos).cast(), $type, O, R).to_bytes(),
-                    );
-                    *current_pos = current_pos.add($size);
-                    comp.data.set_len(old_len + header_len + $size);
-                }};
+            let old_len = guard.data.len();
+            let need = header_len + SIZE_DYN;
+            if guard.data.capacity() - old_len < need + 1 {
+                guard.reserve_slow(need + 1);
             }
+            let dst = guard.data.as_mut_ptr().add(old_len);
+            ptr::copy_nonoverlapping(hdr_start, dst, header_len);
+            ptr::write(
+                dst.add(1).cast(),
+                byteorder::U16::<R>::new(name_len as u16).to_bytes(),
+            );
+            let val_dst = dst.add(header_len);
 
             match tag_id {
-                1 => {
-                    comp.data.reserve(header_len + 1);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    check_bounds!(1);
-                    ptr::write(write_ptr.add(header_len).cast(), *(*current_pos));
-                    *current_pos = current_pos.add(1);
-                    comp.data.set_len(old_len + header_len + 1);
-                }
-                2 => {
-                    case!(2, U16)
-                }
-                3 | 5 => {
-                    case!(4, U32)
-                }
-                4 | 6 => {
-                    case!(8, U64)
-                }
                 7 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len);
-                    let value = slice::from_raw_parts(*current_pos, arr_len);
-                    *current_pos = current_pos.add(arr_len);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    let (len, bytes) = read_u32_array_bytes::<O>(val_pos, rem_val, 1)?;
+                    let val: VecOwn<i8> =
+                        slice::from_raw_parts(val_pos.add(4).cast::<i8>(), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<i8>>(), val);
+                    pos = val_pos.add(4 + bytes);
                 }
                 8 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    check_bounds!(2);
-                    let str_len =
-                        byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(2);
-                    check_bounds!(str_len);
-                    let value = slice::from_raw_parts((*current_pos).cast(), str_len);
-                    *current_pos = current_pos.add(str_len);
-                    ptr::write(write_ptr.cast::<StringOwn>(), value.into());
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    let (s, next) = read_u16_str_slice::<O>(val_pos, rem_val)?;
+                    ptr::write(val_dst.cast::<StringOwn>(), s.into());
+                    pos = next;
                 }
                 9 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    match read_list_fallback::<O, R>(current_pos, end_pos) {
-                        Ok(list) => ptr::write(write_ptr.cast::<ListOwn<R>>(), list),
-                        Err(error) => {
-                            cold_path();
-                            comp.data.push(0);
-                            return Err(error);
-                        }
-                    }
-
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    *current_pos = val_pos;
+                    let child = read_list_fallback::<O, R>(current_pos, end_pos)?;
+                    ptr::write(val_dst.cast::<ListOwn<R>>(), child);
+                    pos = *current_pos;
                 }
                 10 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    match read_compound_fallback::<O, R>(current_pos, end_pos) {
-                        Ok(compound) => ptr::write(write_ptr.cast::<CompoundOwn<R>>(), compound),
-                        Err(error) => {
-                            cold_path();
-                            comp.data.push(0);
-                            return Err(error);
-                        }
-                    }
-
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    *current_pos = val_pos;
+                    let child = read_compound_fallback::<O, R>(current_pos, end_pos)?;
+                    ptr::write(val_dst.cast::<CompoundOwn<R>>(), child);
+                    pos = *current_pos;
                 }
                 11 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len * 4);
-                    let mut value =
-                        Vec::<[u8; 4]>::from(slice::from_raw_parts((*current_pos).cast(), arr_len));
-                    for element in value.iter_mut() {
-                        *element = change_endian!(*element, U32, O, R).to_bytes();
-                    }
-                    *current_pos = current_pos.add(arr_len * 4);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    let (len, bytes) = read_u32_array_bytes::<O>(val_pos, rem_val, 4)?;
+                    let val: VecOwn<byteorder::I32<R>> =
+                        read_swapped_i32_vec::<O, R>(val_pos.add(4), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<byteorder::I32<R>>>(), val);
+                    pos = val_pos.add(4 + bytes);
                 }
                 12 => {
-                    comp.data.reserve(header_len + SIZE_DYN);
-                    let write_ptr = comp.data.as_mut_ptr().add(old_len);
-                    ptr::copy_nonoverlapping(start, write_ptr, header_len);
-                    ptr::write(
-                        write_ptr.add(1).cast(),
-                        byteorder::U16::<R>::new(name_len as u16).to_bytes(),
-                    );
-                    let write_ptr = write_ptr.add(header_len);
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len * 8);
-                    let mut value =
-                        Vec::<[u8; 8]>::from(slice::from_raw_parts((*current_pos).cast(), arr_len));
-                    for element in value.iter_mut() {
-                        *element = change_endian!(*element, U64, O, R).to_bytes();
-                    }
-                    *current_pos = current_pos.add(arr_len * 8);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    comp.data.set_len(old_len + header_len + SIZE_DYN);
+                    let (len, bytes) = read_u32_array_bytes::<O>(val_pos, rem_val, 8)?;
+                    let val: VecOwn<byteorder::I64<R>> =
+                        read_swapped_i64_vec::<O, R>(val_pos.add(4), len).into();
+                    ptr::write(val_dst.cast::<VecOwn<byteorder::I64<R>>>(), val);
+                    pos = val_pos.add(4 + bytes);
                 }
-                _ => {
-                    cold_path();
-                    comp.data.push(0);
-                    return Err(Error::INVALID(tag_id));
-                }
+                _ => core::hint::unreachable_unchecked(),
             }
+            guard.data.set_len(old_len + need);
         }
     }
 }
@@ -687,38 +660,46 @@ unsafe fn read_list_fallback<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<ListOwn<R>> {
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
-                cold_path();
-                return Err(Error::EOF);
-            }
-        };
-    }
-
     unsafe {
-        check_bounds!(1 + 4);
-        let tag_id = **current_pos;
-        *current_pos = current_pos.add(1);
-        let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-        *current_pos = current_pos.add(4);
+        let list_start = *current_pos;
+        let rem = (end_pos as usize) - (list_start as usize);
+        check_rem(rem, 5)?;
+        let tag_id = *list_start;
+        let len = byteorder::U32::<O>::from_bytes(*list_start.add(1).cast()).get() as usize;
+        let mut pos = list_start.add(5);
+        let rem_after = rem - 5;
 
-        macro_rules! case {
-            ($size:expr, $type:ident) => {{
-                check_bounds!(len * $size);
-                let mut list_data = Vec::with_capacity(1 + 4 + len * $size);
-                let write_ptr = list_data.as_mut_ptr();
-                ptr::copy_nonoverlapping((*current_pos).sub(1 + 4), write_ptr, 1 + 4 + len * $size);
+        macro_rules! write_list_hdr {
+            ($vec:ident, $len_u32:expr) => {{
+                let write_ptr = $vec.as_mut_ptr();
+                ptr::write(write_ptr, tag_id);
                 ptr::write(
                     write_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
+                    byteorder::U32::<R>::new($len_u32).to_bytes(),
                 );
-                let s = slice::from_raw_parts_mut(write_ptr.add(1 + 4).cast::<[u8; $size]>(), len);
-                for element in s {
-                    *element = change_endian!(*element, $type, O, R).to_bytes();
+                write_ptr
+            }};
+        }
+
+        macro_rules! prim_list_case {
+            ($size:expr, $type:ident) => {{
+                let Some(bytes) = len.checked_mul($size) else {
+                    cold_path();
+                    return Err(Error::EOF);
+                };
+                check_rem(rem_after, bytes)?;
+                let mut list_data = Vec::<u8>::with_capacity(5 + bytes);
+                let write_ptr = write_list_hdr!(list_data, len as u32);
+                let src_slice = slice::from_raw_parts(pos.cast::<[u8; $size]>(), len);
+                let dst_slice = slice::from_raw_parts_mut(
+                    write_ptr.add(5).cast::<MaybeUninit<[u8; $size]>>(),
+                    len,
+                );
+                for (dst, &elem) in dst_slice.iter_mut().zip(src_slice) {
+                    dst.write(change_endian!(elem, $type, O, R).to_bytes());
                 }
-                *current_pos = current_pos.add(len * $size);
-                list_data.set_len(1 + 4 + len * $size);
+                *current_pos = pos.add(bytes);
+                list_data.set_len(5 + bytes);
                 Ok(ListOwn {
                     data: list_data.into(),
                     _marker: PhantomData,
@@ -728,225 +709,139 @@ unsafe fn read_list_fallback<O: ByteOrder, R: ByteOrder>(
 
         match tag_id {
             0 => {
-                let mut list_data = Vec::with_capacity(1 + 4);
-                let write_ptr = list_data.as_mut_ptr();
-                ptr::write(write_ptr, tag_id);
-                ptr::write(
-                    write_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(1 + 4);
+                let mut list_data = Vec::with_capacity(5);
+                write_list_hdr!(list_data, len as u32);
+                list_data.set_len(5);
+                *current_pos = pos;
                 Ok(ListOwn {
                     data: list_data.into(),
                     _marker: PhantomData,
                 })
             }
             1 => {
-                check_bounds!(len);
-                let mut list_data = Vec::with_capacity(1 + 4 + len);
-                let write_ptr = list_data.as_mut_ptr();
-                ptr::copy_nonoverlapping((*current_pos).sub(1 + 4), write_ptr, 1 + 4 + len);
-                ptr::write(
-                    write_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                *current_pos = current_pos.add(len);
-                list_data.set_len(1 + 4 + len);
+                check_rem(rem_after, len)?;
+                let mut list_data = Vec::with_capacity(5 + len);
+                let write_ptr = write_list_hdr!(list_data, len as u32);
+                ptr::copy_nonoverlapping(pos, write_ptr.add(5), len);
+                *current_pos = pos.add(len);
+                list_data.set_len(5 + len);
                 Ok(ListOwn {
                     data: list_data.into(),
                     _marker: PhantomData,
                 })
             }
-            2 => {
-                case!(2, U16)
-            }
-            3 | 5 => {
-                case!(4, U32)
-            }
+            2 => prim_list_case!(2, U16),
+            3 | 5 => prim_list_case!(4, U32),
             4 | 6 => {
-                case!(8, U64)
-            }
-            7 => {
-                check_bounds!(4 * len); // one Tag::ByteArray is at least 4 bytes (empty Tag::ByteArray)
-                let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-                let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len);
-                    let value = slice::from_raw_parts(*current_pos, arr_len);
-                    *current_pos = current_pos.add(arr_len);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
+                let Some(bytes) = len.checked_mul(8) else {
+                    cold_path();
+                    return Err(Error::EOF);
+                };
+                check_rem(rem_after, bytes)?;
+                let mut list_data = Vec::<u8>::with_capacity(5 + bytes);
+                let write_ptr = write_list_hdr!(list_data, len as u32);
+                ptr::copy_nonoverlapping(pos, write_ptr.add(5), bytes);
+                let dst_slice = slice::from_raw_parts_mut(write_ptr.add(5).cast::<[u8; 8]>(), len);
+                for elem in dst_slice {
+                    *elem = change_endian!(*elem, U64, O, R).to_bytes();
                 }
+                *current_pos = pos.add(bytes);
+                list_data.set_len(5 + bytes);
                 Ok(ListOwn {
-                    data: guard.finalize().into(),
+                    data: list_data.into(),
                     _marker: PhantomData,
                 })
             }
-            8 => {
-                check_bounds!(2 * len); // one Tag::String is at least 2 bytes (empty Tag::String)
-                let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-                let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    check_bounds!(2);
-                    let str_len =
-                        byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(2);
-                    check_bounds!(str_len);
-                    let value = slice::from_raw_parts(*current_pos, str_len);
-                    *current_pos = current_pos.add(str_len);
-                    ptr::write(write_ptr.cast::<StringOwn>(), value.into());
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
+            7..=12 => {
+                if len == 0 {
+                    let mut list_data = Vec::with_capacity(5);
+                    write_list_hdr!(list_data, 0);
+                    list_data.set_len(5);
+                    *current_pos = pos;
+                    return Ok(ListOwn {
+                        data: list_data.into(),
+                        _marker: PhantomData,
+                    });
                 }
-                Ok(ListOwn {
-                    data: guard.finalize().into(),
-                    _marker: PhantomData,
-                })
-            }
-            9 => {
-                check_bounds!((1 + 4) * len); // one Tag::List is at least 5 bytes (empty Tag::List)
-                let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-                let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    ptr::write(
-                        write_ptr.cast::<ListOwn<R>>(),
-                        read_list_fallback::<O, R>(current_pos, end_pos)?,
-                    );
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
+
+                let min_elem = match tag_id {
+                    8 => 2,
+                    9 => 5,
+                    10 => 1,
+                    _ => 4,
+                };
+                if len.checked_mul(min_elem).is_none_or(|min| rem_after < min) {
+                    cold_path();
+                    return Err(Error::EOF);
                 }
-                Ok(ListOwn {
-                    data: guard.finalize().into(),
-                    _marker: PhantomData,
-                })
-            }
-            10 => {
-                check_bounds!(len); // one Tag::Compound is at least 1 bytes (empty Tag::Compound)
+                let Some(dyn_bytes) = len.checked_mul(SIZE_DYN) else {
+                    cold_path();
+                    return Err(Error::EOF);
+                };
+
                 let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
+                    ListBuildGuard::new(Vec::with_capacity(5 + dyn_bytes), tag_id);
                 let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
+                let hdr_ptr = write_list_hdr!(list_data, len as u32);
                 list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    ptr::write(
-                        write_ptr.cast::<CompoundOwn<R>>(),
-                        read_compound_fallback::<O, R>(current_pos, end_pos)?,
-                    );
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
+                let mut write_ptr = hdr_ptr.add(5);
+
+                macro_rules! push_elems {
+                    ($ty:ty, $read_elem:expr) => {{
+                        for _ in 0..len {
+                            let val: $ty = $read_elem;
+                            ptr::write(write_ptr.cast::<$ty>(), val);
+                            write_ptr = write_ptr.add(SIZE_DYN);
+                            let cur_len = list_data.len();
+                            list_data.set_len(cur_len + SIZE_DYN);
+                        }
+                    }};
                 }
-                Ok(ListOwn {
-                    data: guard.finalize().into(),
-                    _marker: PhantomData,
-                })
-            }
-            11 => {
-                check_bounds!(4 * len); // one Tag::IntArray is at least 4 bytes (empty Tag::IntArray)
-                let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-                let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len * 4);
-                    let mut value =
-                        Vec::<[u8; 4]>::from(slice::from_raw_parts((*current_pos).cast(), arr_len));
-                    for element in value.iter_mut() {
-                        *element = change_endian!(*element, U32, O, R).to_bytes();
+
+                match tag_id {
+                    7 => push_elems!(VecOwn<i8>, {
+                        let rem_now = (end_pos as usize) - (pos as usize);
+                        let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 1)?;
+                        let v = slice::from_raw_parts(pos.add(4).cast::<i8>(), n).into();
+                        pos = pos.add(4 + b);
+                        v
+                    }),
+                    8 => push_elems!(StringOwn, {
+                        let rem_now = (end_pos as usize) - (pos as usize);
+                        let (s, next) = read_u16_str_slice::<O>(pos, rem_now)?;
+                        pos = next;
+                        s.into()
+                    }),
+                    9 => {
+                        *current_pos = pos;
+                        push_elems!(ListOwn<R>, read_list_fallback::<O, R>(current_pos, end_pos)?);
+                        pos = *current_pos;
                     }
-                    *current_pos = current_pos.add(arr_len * 4);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
-                }
-                Ok(ListOwn {
-                    data: guard.finalize().into(),
-                    _marker: PhantomData,
-                })
-            }
-            12 => {
-                check_bounds!(4 * len); // one Tag::LongArray is at least 4 bytes (empty Tag::LongArray)
-                let mut guard: ListBuildGuard<R> =
-                    ListBuildGuard::new(Vec::with_capacity(1 + 4 + len * SIZE_DYN), tag_id);
-                let list_data = &mut guard.data;
-                let hdr_ptr = list_data.as_mut_ptr();
-                ptr::write(hdr_ptr, tag_id);
-                ptr::write(
-                    hdr_ptr.add(1).cast(),
-                    byteorder::U32::<R>::new(len as u32).to_bytes(),
-                );
-                list_data.set_len(5);
-                let mut write_ptr = list_data.as_mut_ptr().add(5);
-                for _ in 0..len {
-                    check_bounds!(4);
-                    let arr_len =
-                        byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                    *current_pos = current_pos.add(4);
-                    check_bounds!(arr_len * 8);
-                    let mut value =
-                        Vec::<[u8; 8]>::from(slice::from_raw_parts((*current_pos).cast(), arr_len));
-                    for element in value.iter_mut() {
-                        *element = change_endian!(*element, U64, O, R).to_bytes();
+                    10 => {
+                        *current_pos = pos;
+                        push_elems!(
+                            CompoundOwn<R>,
+                            read_compound_fallback::<O, R>(current_pos, end_pos)?
+                        );
+                        pos = *current_pos;
                     }
-                    *current_pos = current_pos.add(arr_len * 8);
-                    ptr::write(write_ptr.cast::<VecOwn<_>>(), value.into());
-                    write_ptr = write_ptr.add(SIZE_DYN);
-                    let len = list_data.len();
-                    list_data.set_len(len + SIZE_DYN);
+                    11 => push_elems!(VecOwn<byteorder::I32<R>>, {
+                        let rem_now = (end_pos as usize) - (pos as usize);
+                        let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 4)?;
+                        let v = read_swapped_i32_vec::<O, R>(pos.add(4), n).into();
+                        pos = pos.add(4 + b);
+                        v
+                    }),
+                    12 => push_elems!(VecOwn<byteorder::I64<R>>, {
+                        let rem_now = (end_pos as usize) - (pos as usize);
+                        let (n, b) = read_u32_array_bytes::<O>(pos, rem_now, 8)?;
+                        let v = read_swapped_i64_vec::<O, R>(pos.add(4), n).into();
+                        pos = pos.add(4 + b);
+                        v
+                    }),
+                    _ => unreachable!(),
                 }
+                *current_pos = pos;
                 Ok(ListOwn {
                     data: guard.finalize().into(),
                     _marker: PhantomData,
@@ -960,126 +855,83 @@ unsafe fn read_list_fallback<O: ByteOrder, R: ByteOrder>(
     }
 }
 
-/// .
-///
-/// # Errors
-///
-/// This function will return an error if .
-///
-/// # Safety
-///
-/// .
 pub unsafe fn read_unsafe_fallback<O: ByteOrder, R: ByteOrder>(
     tag_id: u8,
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<ValueOwn<R>> {
-    macro_rules! check_bounds {
-        ($extra:expr) => {
-            if (*current_pos as usize) + $extra > end_pos as usize {
-                cold_path();
-                return Err(Error::EOF);
-            }
-        };
-    }
+    let pos = *current_pos;
+    let rem = (end_pos as usize) - (pos as usize);
 
     unsafe {
         assert_unchecked(tag_id != 0);
         match tag_id {
             1 => {
-                check_bounds!(1);
-                let value = *current_pos.cast();
-                *current_pos = current_pos.add(1);
-                Ok(ValueOwn::Byte(value))
+                check_rem(rem, 1)?;
+                *current_pos = pos.add(1);
+                Ok(ValueOwn::Byte(*pos.cast()))
             }
             2 => {
-                check_bounds!(2);
-                let value = byteorder::I16::<O>::from_bytes(*current_pos.cast())
-                    .get()
-                    .into();
-                *current_pos = current_pos.add(2);
-                Ok(ValueOwn::Short(value))
+                check_rem(rem, 2)?;
+                *current_pos = pos.add(2);
+                Ok(ValueOwn::Short(
+                    byteorder::I16::<O>::from_bytes(*pos.cast()).get().into(),
+                ))
             }
             3 => {
-                check_bounds!(4);
-                let value = byteorder::I32::<O>::from_bytes(*current_pos.cast())
-                    .get()
-                    .into();
-                *current_pos = current_pos.add(4);
-                Ok(ValueOwn::Int(value))
+                check_rem(rem, 4)?;
+                *current_pos = pos.add(4);
+                Ok(ValueOwn::Int(
+                    byteorder::I32::<O>::from_bytes(*pos.cast()).get().into(),
+                ))
             }
             4 => {
-                check_bounds!(8);
-                let value = byteorder::I64::<O>::from_bytes(*current_pos.cast())
-                    .get()
-                    .into();
-                *current_pos = current_pos.add(8);
-                Ok(ValueOwn::Long(value))
+                check_rem(rem, 8)?;
+                *current_pos = pos.add(8);
+                Ok(ValueOwn::Long(
+                    byteorder::I64::<O>::from_bytes(*pos.cast()).get().into(),
+                ))
             }
             5 => {
-                check_bounds!(4);
-                let value = byteorder::F32::<O>::from_bytes(*current_pos.cast())
-                    .get()
-                    .into();
-                *current_pos = current_pos.add(4);
-                Ok(ValueOwn::Float(value))
+                check_rem(rem, 4)?;
+                *current_pos = pos.add(4);
+                Ok(ValueOwn::Float(
+                    byteorder::F32::<O>::from_bytes(*pos.cast()).get().into(),
+                ))
             }
             6 => {
-                check_bounds!(8);
-                let value = byteorder::F64::<O>::from_bytes(*current_pos.cast())
-                    .get()
-                    .into();
-                *current_pos = current_pos.add(8);
-                Ok(ValueOwn::Double(value))
+                check_rem(rem, 8)?;
+                *current_pos = pos.add(8);
+                Ok(ValueOwn::Double(
+                    byteorder::F64::<O>::from_bytes(*pos.cast()).get().into(),
+                ))
             }
             7 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len);
-                let value = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len);
-                Ok(ValueOwn::ByteArray(value.into()))
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 1)?;
+                *current_pos = pos.add(4 + bytes);
+                Ok(ValueOwn::ByteArray(
+                    slice::from_raw_parts(pos.add(4).cast::<i8>(), len).into(),
+                ))
             }
             8 => {
-                check_bounds!(2);
-                let len = byteorder::U16::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(2);
-                check_bounds!(len);
-                let value = slice::from_raw_parts((*current_pos).cast(), len);
-                *current_pos = current_pos.add(len);
-                Ok(ValueOwn::String(value.into()))
+                let (s, next) = read_u16_str_slice::<O>(pos, rem)?;
+                *current_pos = next;
+                Ok(ValueOwn::String(s.into()))
             }
             9 => Ok(read_list_fallback::<O, R>(current_pos, end_pos)?.into()),
             10 => Ok(read_compound_fallback::<O, R>(current_pos, end_pos)?.into()),
             11 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len * 4);
-                let mut value =
-                    Vec::<[u8; 4]>::from(slice::from_raw_parts((*current_pos).cast(), len));
-                for element in value.iter_mut() {
-                    *element = change_endian!(*element, U32, O, R).to_bytes();
-                }
-                *current_pos = current_pos.add(len * 4);
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 4)?;
+                *current_pos = pos.add(4 + bytes);
                 Ok(ValueOwn::IntArray(
-                    std::mem::transmute::<Vec<[u8; 4]>, Vec<byteorder::I32<R>>>(value).into(),
+                    read_swapped_i32_vec::<O, R>(pos.add(4), len).into(),
                 ))
             }
             12 => {
-                check_bounds!(4);
-                let len = byteorder::U32::<O>::from_bytes(*current_pos.cast()).get() as usize;
-                *current_pos = current_pos.add(4);
-                check_bounds!(len * 8);
-                let mut value =
-                    Vec::<[u8; 8]>::from(slice::from_raw_parts((*current_pos).cast(), len));
-                for element in value.iter_mut() {
-                    *element = change_endian!(*element, U64, O, R).to_bytes();
-                }
-                *current_pos = current_pos.add(len * 8);
+                let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 8)?;
+                *current_pos = pos.add(4 + bytes);
                 Ok(ValueOwn::LongArray(
-                    std::mem::transmute::<Vec<[u8; 8]>, Vec<byteorder::I64<R>>>(value).into(),
+                    read_swapped_i64_vec::<O, R>(pos.add(4), len).into(),
                 ))
             }
             _ => {
