@@ -4,7 +4,7 @@ use base64ct::Encoding;
 use serde::{ser, Serialize};
 use zerocopy::byteorder;
 
-use crate::{cold_path, tag_of, ByteOrder, Error, Result, TagID};
+use crate::{ByteOrder, Error, Result, TagID, cold_path, tag_of};
 
 /// Serializes a value to a byte vector in NBT format.
 ///
@@ -73,7 +73,7 @@ pub struct Serializer<O: ByteOrder> {
 unsafe fn write_string<O: ByteOrder>(dst: *mut u8, encoded: &[u8]) -> Result<()> {
     unsafe {
         let len = encoded.len();
-        if len >= u16::MAX as usize {
+        if len > u16::MAX as usize {
             cold_path();
             return Err(Error::LEN(len));
         }
@@ -122,20 +122,8 @@ impl<O: ByteOrder> Serializer<O> {
         T: ?Sized + Serialize,
     {
         let tag_id = tag_of(value);
-        unsafe {
-            let old_len = self.vec.len();
-            let encoded = simd_cesu8::mutf8::encode(name);
-            let name_len = encoded.len();
-            self.vec.reserve(1 + 2 + name_len);
-            let write_ptr = self.vec.as_mut_ptr().add(old_len);
-            ptr::write(write_ptr, tag_id as u8);
-            ptr::write(
-                write_ptr.add(1).cast(),
-                byteorder::U16::<O>::new(name_len as u16).to_bytes(),
-            );
-            ptr::copy_nonoverlapping(encoded.as_ptr(), write_ptr.add(3), name_len);
-            self.vec.set_len(old_len + 1 + 2 + name_len);
-        }
+        let encoded = simd_cesu8::mutf8::encode(name);
+        self.write_compound_header(tag_id, &encoded)?;
         value.serialize(&mut *self)
     }
 
@@ -335,7 +323,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
     // ByteArray
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok> {
         let len = v.len();
-        if len >= u32::MAX as usize {
+        if len > u32::MAX as usize {
             cold_path();
             return Err(Error::LEN(len));
         }
@@ -880,7 +868,7 @@ impl<'a, O: ByteOrder> KeySerializer<'a, O> {
             write_ptr = write_ptr.add(1);
             let old_name_len = byteorder::U16::<O>::from_bytes(*write_ptr.cast()).get() as usize;
             let new_name_len = old_name_len + encoded_len + 2; // name()
-            if new_name_len >= u16::MAX as usize {
+            if new_name_len > u16::MAX as usize {
                 cold_path();
                 return Err(Error::LEN(new_name_len));
             }

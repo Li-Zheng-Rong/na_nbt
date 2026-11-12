@@ -1690,3 +1690,9 @@ fn test_unit_enum_serialization_as_key_string() {
         "Unit enum keys should fail - they serialize as Int not String"
     );
 }
+
+#[test]
+fn test_max_u16_length_string_round_trip() {
+    let max_str = "a".repeat(u16::MAX as usize);
+    round_trip_both(&max_str);
+}
