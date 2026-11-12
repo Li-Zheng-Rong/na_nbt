@@ -91,9 +91,44 @@ fn assert_all_modes_parity_be(data: &[u8]) {
             if data[0] != 0 {
                 let round_be = o_be.write_to_vec::<BigEndian>();
                 let round_le_to_be = o_le.write_to_vec::<BigEndian>();
+                let b_to_be = b_root.write_to_vec::<BigEndian>();
                 assert_eq!(round_be, round_le_to_be);
+                assert_eq!(round_be, b_to_be);
+
+                let round_be_to_le = o_be.write_to_vec::<LittleEndian>();
+                let round_le = o_le.write_to_vec::<LittleEndian>();
+                let b_to_le = b_root.write_to_vec::<LittleEndian>();
+                assert_eq!(round_be_to_le, round_le);
+                assert_eq!(round_be_to_le, b_to_le);
+
+                let mut w_b_be = Vec::new();
+                b_root.write_to_writer::<BigEndian>(&mut w_b_be).unwrap();
+                assert_eq!(w_b_be, round_be);
+
+                let mut w_b_le = Vec::new();
+                b_root.write_to_writer::<LittleEndian>(&mut w_b_le).unwrap();
+                assert_eq!(w_b_le, round_le);
+
+                let mut w_obe_be = Vec::new();
+                o_be.write_to_writer::<BigEndian>(&mut w_obe_be).unwrap();
+                assert_eq!(w_obe_be, round_be);
+
+                let mut w_obe_le = Vec::new();
+                o_be.write_to_writer::<LittleEndian>(&mut w_obe_le).unwrap();
+                assert_eq!(w_obe_le, round_le);
+
+                let mut w_ole_be = Vec::new();
+                o_le.write_to_writer::<BigEndian>(&mut w_ole_be).unwrap();
+                assert_eq!(w_ole_be, round_be);
+
+                let mut w_ole_le = Vec::new();
+                o_le.write_to_writer::<LittleEndian>(&mut w_ole_le).unwrap();
+                assert_eq!(w_ole_le, round_le);
+
                 let reparsed = read_borrowed::<BigEndian>(&round_be).unwrap();
                 assert_eq!(d1, canonical_dump(&reparsed.root()));
+                let reparsed_le = read_borrowed::<LittleEndian>(&round_le).unwrap();
+                assert_eq!(d1, canonical_dump(&reparsed_le.root()));
             }
         }
         (Err(e1), Err(e2), Err(e3)) => {
