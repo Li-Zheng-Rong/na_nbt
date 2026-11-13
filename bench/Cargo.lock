@@ -495,6 +495,19 @@ dependencies = [
 [[package]]
 name = "na_nbt"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa4b9d79a8cfc58fe3486c06a923f37b96d74947173333239d407c5190fd7b85"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "serde",
+ "simd_cesu8",
+ "zerocopy",
+]
+
+[[package]]
+name = "na_nbt"
+version = "0.3.0"
 dependencies = [
  "base64ct",
  "bytes",
@@ -516,7 +529,8 @@ dependencies = [
  "graphite_binary",
  "hematite-nbt",
  "mimalloc",
- "na_nbt",
+ "na_nbt 0.2.1",
+ "na_nbt 0.3.0",
  "serde",
  "shen-nbt5",
  "simdnbt",

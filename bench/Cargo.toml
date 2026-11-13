@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 na_nbt = { path = "..", features = ["i128", "serde", "shared", "nightly"] }
+na_nbt_02 = { package = "na_nbt", version = "0.2.1", features = ["i128", "serde", "shared", "nightly"] }
 bytes = "1.11"
 criterion = "0.8"
 mimalloc = "0.1"

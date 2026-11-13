@@ -1,6 +1,6 @@
 [package]
 name = "na_nbt"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["zijinshanren"]
 description = "High-performance NBT (Named Binary Tag) library with zero-copy parsing and serde support"

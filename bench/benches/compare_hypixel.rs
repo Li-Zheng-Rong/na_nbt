@@ -48,10 +48,17 @@ pub fn bench_read_file(filename: &str, c: &mut Criterion) {
                 .root(),
         )
         .unwrap();
+        let na_nbt_02_nbt = na_nbt_02_items_from_nbt(
+            &na_nbt_02::read_borrowed::<na_nbt_02::BigEndian>(input)
+                .unwrap()
+                .root(),
+        )
+        .unwrap();
 
         assert_eq!(azalea_nbt, graphite_nbt);
         assert_eq!(azalea_nbt, simdnbt_nbt);
         assert_eq!(azalea_nbt, na_nbt_nbt);
+        assert_eq!(azalea_nbt, na_nbt_02_nbt);
     }
 
     group.warm_up_time(Duration::from_secs(5));
@@ -78,6 +85,14 @@ pub fn bench_read_file(filename: &str, c: &mut Criterion) {
             let input = black_box(input);
             let nbt = black_box(na_nbt::read_borrowed::<na_nbt::BigEndian>(input)).unwrap();
             black_box(na_nbt_items_from_nbt(nbt.root()));
+        })
+    });
+
+    group.bench_function("na_nbt_02_parse", |b| {
+        b.iter(|| {
+            let input = black_box(input);
+            let nbt = black_box(na_nbt_02::read_borrowed::<na_nbt_02::BigEndian>(input)).unwrap();
+            black_box(na_nbt_02_items_from_nbt(&nbt.root()));
         })
     });
 
@@ -178,6 +193,68 @@ fn na_nbt_items_from_nbt<'s>(nbt: impl AsValueRef<'s>) -> Option<Vec<Option<Item
                 .unwrap_or_default(),
             timestamp: item_extra_attributes
                 .and_then(|e| e.get_string("timestamp"))
+                .map(|t| t.to_utf8_string()),
+        }));
+    }
+    Some(items)
+}
+
+fn na_nbt_02_items_from_nbt<'s>(nbt: &impl na_nbt_02::ValueRef<'s>) -> Option<Vec<Option<Item>>> {
+    use na_nbt_02::{CompoundRef as _, TypedListRef as _, ValueRef as _, tag::*};
+    let mut items = Vec::new();
+    for item_nbt in nbt.get_::<TypedList<Compound>>("i").unwrap_or_default() {
+        if item_nbt.get_::<Short>("id").is_none() {
+            items.push(None);
+            continue;
+        }
+
+        let item_tag = item_nbt.get_::<Compound>("tag")?;
+        let item_extra_attributes = item_tag
+            .get_::<Compound>("ExtraAttributes")
+            .unwrap_or_default();
+        let item_display = item_tag.get_::<Compound>("display").unwrap_or_default();
+
+        items.push(Some(Item {
+            id: item_nbt.get_::<Short>("id")?,
+            damage: item_nbt.get_::<Short>("Damage")?,
+            count: item_nbt.get_::<Byte>("Count")?,
+
+            head_texture_id: item_tag
+                .get("SkullOwner")
+                .and_then(|skull_owner| skull_owner.get_::<Compound>("Properties"))
+                .and_then(|props| props.get_::<TypedList<Compound>>("textures"))
+                .and_then(|textures| textures.get(0))
+                .and_then(|texture| texture.get_::<String>("Value"))
+                .map(|s| s.to_utf8_string()),
+            skyblock_id: item_extra_attributes
+                .get_::<String>("id")
+                .map(|id| id.to_utf8_string()),
+            reforge: item_extra_attributes
+                .get_::<String>("modifier")
+                .map(|id| id.to_utf8_string()),
+
+            display: ItemDisplay {
+                name: item_display
+                    .get_::<String>("Name")
+                    .map(|n| n.to_utf8_string())
+                    .unwrap_or_default(),
+                lore: item_display
+                    .get_::<TypedList<String>>("Lore")
+                    .map(|l| l.into_iter().map(|s| s.to_utf8_string()).collect())
+                    .unwrap_or_default(),
+                color: item_display.get_::<Int>("color"),
+                has_glint: item_extra_attributes.get("ench").is_some(),
+            },
+            enchantments: item_extra_attributes
+                .get_::<Compound>("enchantments")
+                .map(|c| {
+                    c.into_iter()
+                        .map(|(k, v)| (k.to_utf8_string(), v.into_::<Int>().unwrap_or_default()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            timestamp: item_extra_attributes
+                .get_::<String>("timestamp")
                 .map(|t| t.to_utf8_string()),
         }));
     }

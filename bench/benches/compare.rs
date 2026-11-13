@@ -6,6 +6,7 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
+use na_nbt_02::Writable as _;
 
 fn bench_read_file(filename: &str, c: &mut Criterion) {
     let mut file = File::open(format!("tests/{filename}")).unwrap();
@@ -32,10 +33,23 @@ fn bench_read_file(filename: &str, c: &mut Criterion) {
             black_box(na_nbt::read_borrowed::<na_nbt::BigEndian>(data)).unwrap();
         })
     });
+    group.bench_function("na_nbt_02_borrow_parse", |b| {
+        b.iter(|| {
+            black_box(na_nbt_02::read_borrowed::<na_nbt_02::BigEndian>(data)).unwrap();
+        })
+    });
     let bytes = bytes::Bytes::copy_from_slice(data);
     group.bench_function("na_nbt_shared_parse", |b| {
         b.iter(|| {
             black_box(na_nbt::read_shared::<na_nbt::BigEndian>(bytes.clone())).unwrap();
+        })
+    });
+    group.bench_function("na_nbt_02_shared_parse", |b| {
+        b.iter(|| {
+            black_box(na_nbt_02::read_shared::<na_nbt_02::BigEndian>(
+                bytes.clone(),
+            ))
+            .unwrap();
         })
     });
     group.bench_function("na_nbt_owned_parse", |b| {
@@ -43,6 +57,15 @@ fn bench_read_file(filename: &str, c: &mut Criterion) {
             black_box(na_nbt::read_owned::<na_nbt::BigEndian, na_nbt::BigEndian>(
                 data,
             ))
+            .unwrap();
+        })
+    });
+    group.bench_function("na_nbt_02_owned_parse", |b| {
+        b.iter(|| {
+            black_box(na_nbt_02::read_owned::<
+                na_nbt_02::BigEndian,
+                na_nbt_02::BigEndian,
+            >(data))
             .unwrap();
         })
     });
@@ -118,10 +141,27 @@ fn bench_read_file(filename: &str, c: &mut Criterion) {
         })
     });
 
-    let nbt = na_nbt::read_shared::<na_nbt::BigEndian>(bytes).unwrap();
+    let doc_02 = na_nbt_02::read_borrowed::<na_nbt_02::BigEndian>(data).unwrap();
+    let nbt_02 = doc_02.root();
+    group.bench_function("na_nbt_02_borrow_write", |b| {
+        b.iter(|| {
+            let out = nbt_02.write_to_vec::<na_nbt_02::BigEndian>();
+            black_box(out);
+        })
+    });
+
+    let nbt = na_nbt::read_shared::<na_nbt::BigEndian>(bytes.clone()).unwrap();
     group.bench_function("na_nbt_shared_write", |b| {
         b.iter(|| {
             let out = nbt.write_to_vec::<na_nbt::BigEndian>();
+            black_box(out);
+        })
+    });
+
+    let nbt_02 = na_nbt_02::read_shared::<na_nbt_02::BigEndian>(bytes).unwrap();
+    group.bench_function("na_nbt_02_shared_write", |b| {
+        b.iter(|| {
+            let out = nbt_02.write_to_vec::<na_nbt_02::BigEndian>();
             black_box(out);
         })
     });
@@ -130,6 +170,14 @@ fn bench_read_file(filename: &str, c: &mut Criterion) {
     group.bench_function("na_nbt_owned_write", |b| {
         b.iter(|| {
             let out = nbt.write_to_vec::<na_nbt::BigEndian>();
+            black_box(out);
+        })
+    });
+
+    let nbt_02 = na_nbt_02::read_owned::<na_nbt_02::BigEndian, na_nbt_02::BigEndian>(data).unwrap();
+    group.bench_function("na_nbt_02_owned_write", |b| {
+        b.iter(|| {
+            let out = nbt_02.write_to_vec::<na_nbt_02::BigEndian>();
             black_box(out);
         })
     });
