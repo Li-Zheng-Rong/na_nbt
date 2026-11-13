@@ -3,15 +3,15 @@ use std::{fmt, io::Write, marker::PhantomData, mem::ManuallyDrop, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundIter, CompoundRef, EMPTY_COMPOUND, ElementTag, IntoNBT, ListOwn, MUTF8Str,
-    MUTF8String, Owned, Result, Tag, TagID, ValueMut, ValueOwn, ValueRef, Writable, cold_path,
+    cold_path,
     owned::{
-        OwnedPtr,
         slot::{drop_compound_entries, mutable_tag_size, slot_write},
-        write_compound_sink,
+        write_compound_sink, OwnedPtr,
     },
     with_mutf8_key,
-    write::{ByteSink, IoSink, sink_to_vec},
+    write::{sink_to_vec, ByteSink, IoSink},
+    ByteOrder, CompoundIter, CompoundRef, ElementTag, IntoNBT, ListOwn, MUTF8Str, MUTF8String,
+    Owned, Result, Tag, TagID, ValueMut, ValueOwn, ValueRef, Writable, EMPTY_COMPOUND,
 };
 
 /// An owned, flat-buffer NBT compound map.
@@ -139,10 +139,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
                     dst.write(V::Tag::TAG_ID as u8);
                     ptr::write_unaligned(dst.add(1).cast::<[u8; 2]>(), name_len_raw);
                     ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(3), name_len);
-                    <V::Tag as ElementTag>::write_own_to_slot::<O>(
-                        dst.add(3 + name_len),
-                        new_val,
-                    );
+                    <V::Tag as ElementTag>::write_own_to_slot::<O>(dst.add(3 + name_len), new_val);
                     dst.add(3 + name_len + new_size).write(TagID::End as u8);
                     self.data.set_len(total);
                     return None;
@@ -177,10 +174,7 @@ impl<O: ByteOrder> CompoundOwn<O> {
                             tail_len,
                         );
                         base.add(entry_off).write(V::Tag::TAG_ID as u8);
-                        <V::Tag as ElementTag>::write_own_to_slot::<O>(
-                            base.add(val_off),
-                            new_val,
-                        );
+                        <V::Tag as ElementTag>::write_own_to_slot::<O>(base.add(val_off), new_val);
                         self.data.set_len(old_total + grow);
                     }
                     return Some(old_val);

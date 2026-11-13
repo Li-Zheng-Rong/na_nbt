@@ -1,6 +1,4 @@
-use na_nbt::{
-    AsValueRef, BE, ByteOrder, CompoundOwn, TypedListOwn, ValueRef, read_borrowed, tag,
-};
+use na_nbt::{read_borrowed, tag, AsValueRef, ByteOrder, CompoundOwn, TypedListOwn, ValueRef, BE};
 use serde::{Deserialize, Serialize};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

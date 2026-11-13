@@ -145,10 +145,10 @@
 //! # }
 //! ```
 
+pub use zerocopy::byteorder::{BE, F32, F64, I128, I16, I32, I64, LE, U128, U16, U32, U64};
 pub use zerocopy::BigEndian;
 pub use zerocopy::LittleEndian;
 pub use zerocopy::NativeEndian;
-pub use zerocopy::byteorder::{BE, F32, F64, I16, I32, I64, I128, LE, U16, U32, U64, U128};
 
 pub mod error;
 mod index;
@@ -162,12 +162,12 @@ mod write;
 
 pub use error::{Error, Result};
 pub use index::Index;
-pub use mutf8::{ByteOrder, MUTF8Str, MUTF8String};
+pub(crate) use mutf8::{
+    cold_path, same_byte_order, with_mutf8_key, EMPTY_COMPOUND, EMPTY_LIST, EMPTY_TYPED_LISTS,
+};
 #[cfg(feature = "serde")]
 pub(crate) use mutf8::{decode_mutf8_lossy, encode_mutf8};
-pub(crate) use mutf8::{
-    EMPTY_COMPOUND, EMPTY_LIST, EMPTY_TYPED_LISTS, cold_path, same_byte_order, with_mutf8_key,
-};
+pub use mutf8::{ByteOrder, MUTF8Str, MUTF8String};
 pub use owned::{
     compound::{CompoundIterMut, CompoundOwn},
     into_nbt::IntoNBT,
@@ -176,16 +176,17 @@ pub use owned::{
     slot::{Mut, Scalar, ScalarMut, SlotValue},
     value::{ValueMut, ValueOwn},
 };
-#[cfg(feature = "shared")]
-pub use read::{SharedDocument, read_shared};
 pub use read::{
-    BorrowedDocument, Document, read_borrowed, read_document,
+    read_borrowed, read_document,
     view::{
         AsCompoundRef, AsListRef, AsValueRef, CompoundIter, CompoundRef, ListIter, ListRef,
         TypedListIter, TypedListRef, ValueRef,
     },
+    BorrowedDocument, Document,
 };
+#[cfg(feature = "shared")]
+pub use read::{read_shared, SharedDocument};
 #[cfg(feature = "serde")]
 pub use ser_de::*;
-pub use tags::{Borrowed, ElementTag, Owned, Source, Tag, TagID, tag};
+pub use tags::{tag, Borrowed, ElementTag, Owned, Source, Tag, TagID};
 pub use write::Writable;

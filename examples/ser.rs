@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use na_nbt::{AsValueRef, ValueRef, from_slice_be, read_borrowed, to_vec_be};
+use na_nbt::{from_slice_be, read_borrowed, to_vec_be, AsValueRef, ValueRef};
 use serde::{Deserialize, Serialize};
 use zerocopy::BigEndian;
 

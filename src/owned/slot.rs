@@ -8,11 +8,11 @@ use std::{
     ptr, slice,
 };
 
-use zerocopy::{NativeEndian, byteorder};
+use zerocopy::{byteorder, NativeEndian};
 
 use crate::{
-    ByteOrder, CompoundOwn, EMPTY_COMPOUND, EMPTY_LIST, ElementTag, ListOwn, MUTF8Str, MUTF8String,
-    Result, TagID, TypedListOwn, Writable, same_byte_order,
+    same_byte_order, ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, Result,
+    TagID, TypedListOwn, Writable, EMPTY_COMPOUND, EMPTY_LIST,
 };
 
 pub(crate) const SIZE_DYN: usize = mem::size_of::<Vec<u8>>();
@@ -111,13 +111,21 @@ pub(crate) unsafe fn slot_borrow_str<'a>(slot: *const u8) -> &'a MUTF8Str {
 #[inline(always)]
 pub(crate) unsafe fn slot_compound_ptr(slot: *const u8) -> *const u8 {
     let (ptr, len) = unsafe { slot_vec_parts::<u8>(slot) };
-    if len == 0 { EMPTY_COMPOUND.as_ptr() } else { ptr }
+    if len == 0 {
+        EMPTY_COMPOUND.as_ptr()
+    } else {
+        ptr
+    }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn slot_list_ptr(slot: *const u8) -> *const u8 {
     let (ptr, len) = unsafe { slot_vec_parts::<u8>(slot) };
-    if len == 0 { EMPTY_LIST.as_ptr() } else { ptr }
+    if len == 0 {
+        EMPTY_LIST.as_ptr()
+    } else {
+        ptr
+    }
 }
 
 #[inline]
@@ -147,11 +155,7 @@ pub(crate) unsafe fn drop_compound_entries<O: ByteOrder>(mut ptr: *mut u8, end: 
 }
 
 #[inline]
-pub(crate) unsafe fn drop_list_elements<O: ByteOrder>(
-    tag_id: TagID,
-    ptr: *mut u8,
-    count: usize,
-) {
+pub(crate) unsafe fn drop_list_elements<O: ByteOrder>(tag_id: TagID, ptr: *mut u8, count: usize) {
     unsafe fn drop_slots<T>(mut ptr: *mut u8, count: usize) {
         for _ in 0..count {
             unsafe {

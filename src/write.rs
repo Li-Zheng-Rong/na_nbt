@@ -2,7 +2,7 @@ use std::{convert::Infallible, io::Write, mem::MaybeUninit, ptr, slice};
 
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, MUTF8Str, MUTF8String, Result, TagID, same_byte_order};
+use crate::{same_byte_order, ByteOrder, Error, MUTF8Str, MUTF8String, Result, TagID};
 
 /// Serializes an NBT value to a byte vector or [`Write`] stream with a chosen target [`ByteOrder`].
 pub trait Writable {
@@ -49,12 +49,7 @@ pub(crate) trait ByteSink {
         self.write_3(a, b, &[])
     }
 
-    fn write_3(
-        &mut self,
-        a: &[u8],
-        b: &[u8],
-        c: &[u8],
-    ) -> core::result::Result<(), Self::Error>;
+    fn write_3(&mut self, a: &[u8], b: &[u8], c: &[u8]) -> core::result::Result<(), Self::Error>;
 
     fn write_swapped_slice<const N: usize>(
         &mut self,
@@ -79,12 +74,7 @@ impl ByteSink for Vec<u8> {
     }
 
     #[inline(always)]
-    fn write_3(
-        &mut self,
-        a: &[u8],
-        b: &[u8],
-        c: &[u8],
-    ) -> core::result::Result<(), Infallible> {
+    fn write_3(&mut self, a: &[u8], b: &[u8], c: &[u8]) -> core::result::Result<(), Infallible> {
         let total = a.len() + b.len() + c.len();
         let old_len = self.len();
         Vec::reserve(self, total);
@@ -348,14 +338,12 @@ fn write_endian_array_sink<O: ByteOrder, TARGET: ByteOrder, S: ByteSink, const N
     hdr[0] = tag as u8;
     hdr[3..7].copy_from_slice(&byteorder::U32::<TARGET>::new(slice_ref.len() as u32).to_bytes());
     if const { same_byte_order::<O, TARGET>() } {
-        let bytes = unsafe {
-            slice::from_raw_parts(slice_ref.as_ptr().cast::<u8>(), slice_ref.len() * N)
-        };
+        let bytes =
+            unsafe { slice::from_raw_parts(slice_ref.as_ptr().cast::<u8>(), slice_ref.len() * N) };
         sink.write_2(&hdr, bytes)
     } else {
-        let elems = unsafe {
-            slice::from_raw_parts(slice_ref.as_ptr().cast::<[u8; N]>(), slice_ref.len())
-        };
+        let elems =
+            unsafe { slice::from_raw_parts(slice_ref.as_ptr().cast::<[u8; N]>(), slice_ref.len()) };
         sink.write_swapped_slice(&hdr, elems, swap)
     }
 }

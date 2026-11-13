@@ -15,17 +15,18 @@ use std::{
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundRef, EMPTY_COMPOUND, EMPTY_LIST, Error, ListRef, MUTF8Str, Owned, Result,
-    Source, TagID, ValueOwn, cold_path,
+    cold_path,
     owned::{
         parser::read_unsafe,
         slot::{
-            SIZE_DYN, mutable_tag_size, slot_borrow_slice, slot_borrow_str, slot_compound_ptr,
-            slot_list_ptr, slot_vec_parts,
+            mutable_tag_size, slot_borrow_slice, slot_borrow_str, slot_compound_ptr, slot_list_ptr,
+            slot_vec_parts, SIZE_DYN,
         },
     },
     same_byte_order,
-    write::{ByteSink, IoSink, sink_to_vec, swap_u16, swap_u32, swap_u64},
+    write::{sink_to_vec, swap_u16, swap_u32, swap_u64, ByteSink, IoSink},
+    ByteOrder, CompoundRef, Error, ListRef, MUTF8Str, Owned, Result, Source, TagID, ValueOwn,
+    EMPTY_COMPOUND, EMPTY_LIST,
 };
 
 /// Parses an NBT byte slice into an owned [`ValueOwn<R>`] tree, converting from input byte order

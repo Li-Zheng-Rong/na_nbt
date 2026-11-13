@@ -3,9 +3,10 @@ use std::{hint::assert_unchecked, io::Write, marker::PhantomData, ptr};
 use zerocopy::byteorder;
 
 use crate::{
+    cold_path,
+    owned::slot::{slot_list_ptr, slot_read, slot_write, SIZE_DYN},
     ByteOrder, CompoundOwn, CompoundRef, Error, ListOwn, ListRef, MUTF8Str, MUTF8String, Mut,
-    Result, ScalarMut, TypedListOwn, TypedListRef, ValueMut, ValueOwn, ValueRef, cold_path,
-    owned::slot::{SIZE_DYN, slot_list_ptr, slot_read, slot_write},
+    Result, ScalarMut, TypedListOwn, TypedListRef, ValueMut, ValueOwn, ValueRef,
 };
 
 const TAG_ELEM_SIZES: [u8; 13] = [0, 1, 2, 4, 8, 4, 8, 1, 0, 0, 0, 4, 8];
@@ -555,9 +556,7 @@ macro_rules! impl_dyn_tag {
             type Own<$ord: ByteOrder> = $own_ty;
 
             #[inline(always)]
-            unsafe fn read_ref<$lt, $src: Source>(
-                iter: &mut $src::IterCursor,
-            ) -> Option<$ref_ty> {
+            unsafe fn read_ref<$lt, $src: Source>(iter: &mut $src::IterCursor) -> Option<$ref_ty> {
                 Some(unsafe { Self::read_elem_ref::<$src>(iter) })
             }
             #[inline(always)]

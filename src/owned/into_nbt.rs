@@ -3,9 +3,9 @@ use std::{borrow::Cow, mem::ManuallyDrop, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, TypedListOwn,
     same_byte_order, tag,
     write::{swap_u32, swap_u64},
+    ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, TypedListOwn,
 };
 
 /// Converts Rust values into owned NBT payloads with statically known [`ElementTag`].

@@ -2,7 +2,7 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, Result, TagID, cold_path};
+use crate::{cold_path, ByteOrder, Error, Result, TagID};
 
 #[derive(Copy, Clone, Default, Debug)]
 #[repr(C)]
@@ -72,7 +72,11 @@ impl FrameStack {
     fn last_mut(&mut self) -> &mut ParentFrame {
         debug_assert!(self.len > 0);
         if self.len <= INLINE_STACK_CAP {
-            unsafe { self.inline.get_unchecked_mut(self.len - 1).assume_init_mut() }
+            unsafe {
+                self.inline
+                    .get_unchecked_mut(self.len - 1)
+                    .assume_init_mut()
+            }
         } else {
             let idx = self.len - INLINE_STACK_CAP - 1;
             unsafe { self.overflow.get_unchecked_mut(idx) }
@@ -196,10 +200,7 @@ unsafe fn skip_array<O: ByteOrder>(
 
 enum ListNext {
     Leaf(*const u8),
-    Container {
-        pos: *const u8,
-        frame: ParentFrame,
-    },
+    Container { pos: *const u8, frame: ParentFrame },
 }
 
 #[inline(always)]
@@ -267,7 +268,10 @@ unsafe fn parse_list<O: ByteOrder>(
                     return Ok(ListNext::Leaf(pos));
                 }
                 let min_elem = if elem_type == 9 { 5 } else { 1 };
-                if count.checked_mul(min_elem).is_none_or(|min| rem_after < min) {
+                if count
+                    .checked_mul(min_elem)
+                    .is_none_or(|min| rem_after < min)
+                {
                     cold_path();
                     return Err(Error::EOF);
                 }
@@ -433,10 +437,7 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
                     let tag_id = *pos;
                     if tag_id == 0 {
                         pos = pos.add(1);
-                        mark.finish_slot(
-                            cur_mark,
-                            ((pos as usize) - (cur_start as usize)) as u32,
-                        );
+                        mark.finish_slot(cur_mark, ((pos as usize) - (cur_start as usize)) as u32);
                         ascend!();
                         if matches!(mode, Mode::Compound) {
                             continue 'comp_loop;

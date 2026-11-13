@@ -8,10 +8,11 @@ use std::{
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundOwn, Error, ListOwn, MUTF8String, Result, TagID, ValueOwn, cold_path,
-    owned::slot::{SIZE_DYN, drop_compound_entries, drop_list_elements, slot_write},
+    cold_path,
+    owned::slot::{drop_compound_entries, drop_list_elements, slot_write, SIZE_DYN},
     same_byte_order,
     write::{swap_u16, swap_u32, swap_u64},
+    ByteOrder, CompoundOwn, Error, ListOwn, MUTF8String, Result, TagID, ValueOwn,
 };
 
 struct CompoundBuildGuard<O: ByteOrder> {

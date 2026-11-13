@@ -9,16 +9,16 @@ use std::{
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundOwn, EMPTY_LIST, EMPTY_TYPED_LISTS, ElementTag, IntoNBT, ListIter, ListRef,
-    MUTF8String, Owned, Result, Tag, TagID, TypedListIter, TypedListRef, ValueMut, ValueOwn,
-    ValueRef, Writable, cold_path,
+    cold_path,
     owned::{
-        OwnedPtr,
-        slot::{SIZE_DYN, drop_list_elements, mutable_tag_size, slot_read, slot_write},
-        write_list_sink,
+        slot::{drop_list_elements, mutable_tag_size, slot_read, slot_write, SIZE_DYN},
+        write_list_sink, OwnedPtr,
     },
     tag,
-    write::{ByteSink, IoSink, sink_to_vec},
+    write::{sink_to_vec, ByteSink, IoSink},
+    ByteOrder, CompoundOwn, ElementTag, IntoNBT, ListIter, ListRef, MUTF8String, Owned, Result,
+    Tag, TagID, TypedListIter, TypedListRef, ValueMut, ValueOwn, ValueRef, Writable, EMPTY_LIST,
+    EMPTY_TYPED_LISTS,
 };
 
 #[inline(always)]
@@ -132,7 +132,11 @@ impl<O: ByteOrder> ListOwn<O> {
             return None;
         }
         let tag_id = self.element_tag_id();
-        let slot = unsafe { self.data.as_mut_ptr().add(5 + index * mutable_tag_size(tag_id)) };
+        let slot = unsafe {
+            self.data
+                .as_mut_ptr()
+                .add(5 + index * mutable_tag_size(tag_id))
+        };
         Some(unsafe { ValueMut::from_slot(tag_id, slot) })
     }
 

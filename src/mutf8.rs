@@ -74,8 +74,7 @@ fn is_non_null_ascii_short_16(bytes: &[u8]) -> bool {
     }
     let a = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
     let b = u64::from_ne_bytes(bytes[len - 8..].try_into().unwrap());
-    (((a | a.wrapping_sub(0x0101_0101_0101_0101))
-        | (b | b.wrapping_sub(0x0101_0101_0101_0101)))
+    (((a | a.wrapping_sub(0x0101_0101_0101_0101)) | (b | b.wrapping_sub(0x0101_0101_0101_0101)))
         & 0x8080_8080_8080_8080)
         == 0
 }
@@ -456,7 +455,7 @@ impl From<Cow<'_, str>> for MUTF8String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BigEndian, CompoundOwn, Writable, read_borrowed, read_owned, tag};
+    use crate::{read_borrowed, read_owned, tag, BigEndian, CompoundOwn, Writable};
 
     fn assert_decode_parity(bytes: &[u8]) {
         let m = unsafe { MUTF8Str::from_mutf8_unchecked(bytes) };
@@ -512,7 +511,11 @@ mod tests {
     fn assert_encode_parity(s: &str, expect_borrowed: bool) {
         let got = encode_mutf8(s);
         let exp = simd_cesu8::mutf8::encode(s);
-        assert_eq!(got.as_ref(), exp.as_ref(), "encode_mutf8 mismatch for {s:?}");
+        assert_eq!(
+            got.as_ref(),
+            exp.as_ref(),
+            "encode_mutf8 mismatch for {s:?}"
+        );
         assert_eq!(
             matches!(got, Cow::Borrowed(_)),
             expect_borrowed,
@@ -618,10 +621,7 @@ mod tests {
         );
         assert_eq!(&*s_mutf8.decode_strict().unwrap(), "null\0emoji🎉");
         s_mutf8.push_str("_tail\0🚀");
-        assert_eq!(
-            &*s_mutf8.decode_strict().unwrap(),
-            "null\0emoji🎉_tail\0🚀"
-        );
+        assert_eq!(&*s_mutf8.decode_strict().unwrap(), "null\0emoji🎉_tail\0🚀");
 
         let mut root = CompoundOwn::<BigEndian>::new();
         root.insert("ascii_key", "ascii_val");

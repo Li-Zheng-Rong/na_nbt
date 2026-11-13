@@ -2033,7 +2033,8 @@ fn test_huge_lengths_no_oom_and_end_list_compat() {
     }
     let truncated_huge_list = [
         10u8, 0, 0, // Compound ""
-        9, 0, 5, b'i', b't', b'e', b'm', b's', 4, 0xFF, 0xFF, 0xFF, 0xFF, // List<Long> len=u32::MAX
+        9, 0, 5, b'i', b't', b'e', b'm', b's', 4, 0xFF, 0xFF, 0xFF,
+        0xFF, // List<Long> len=u32::MAX
         0,
     ];
     assert!(matches!(
@@ -2055,11 +2056,95 @@ fn test_deeply_nested_compounds_no_artificial_limit() {
     }
     nested.resize(nested.len() + depth + 1, 0); // closing TAG_End bytes
 
-    assert_eq!(from_slice_be::<EmptyStruct>(&nested).unwrap(), EmptyStruct {});
+    assert_eq!(
+        from_slice_be::<EmptyStruct>(&nested).unwrap(),
+        EmptyStruct {}
+    );
 }
 
 #[test]
 fn test_max_u16_length_string_round_trip() {
     let max_str = "a".repeat(u16::MAX as usize);
     round_trip_both(&max_str);
+}
+
+#[test]
+fn test_fixed_prim_seq_all_types_mismatch_and_remain() {
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct NewtypeInt(i32);
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct HomogeneousLists {
+        #[serde(with = "na_nbt::list")]
+        bools: Vec<bool>,
+        #[serde(with = "na_nbt::list")]
+        bytes: Vec<i8>,
+        #[serde(with = "na_nbt::list")]
+        shorts: Vec<i16>,
+        #[serde(with = "na_nbt::list")]
+        ints: Vec<NewtypeInt>,
+        #[serde(with = "na_nbt::list")]
+        chars: Vec<char>,
+        #[serde(with = "na_nbt::list")]
+        units: Vec<EnumUnit>,
+        #[serde(with = "na_nbt::list")]
+        longs: Vec<i64>,
+        #[serde(with = "na_nbt::list")]
+        floats: Vec<f32>,
+        #[serde(with = "na_nbt::list")]
+        doubles: Vec<f64>,
+    }
+
+    round_trip_both(&HomogeneousLists {
+        bools: vec![true, false, true],
+        bytes: vec![-128, 0, 127],
+        shorts: vec![-1000, 0, 1000],
+        ints: vec![NewtypeInt(-5), NewtypeInt(42)],
+        chars: vec!['A', '中', '🚀'],
+        units: vec![EnumUnit::VariantA, EnumUnit::VariantC],
+        longs: vec![i64::MIN, 0, i64::MAX],
+        floats: vec![-1.5, 0.0, 3.25],
+        doubles: vec![-2.5, 0.0, 6.5],
+    });
+
+    // Type mismatch inside IntArray must return Error::MISMATCH (expected Long, actual Int)
+    let root_int_arr = [
+        11u8, 0, 0, // root IntArray ""
+        0, 0, 0, 2, // len = 2
+        0, 0, 0, 1, 0, 0, 0, 2,
+    ];
+    assert!(matches!(
+        from_slice_be::<Vec<i64>>(&root_int_arr),
+        Err(na_nbt::Error::MISMATCH {
+            expected: na_nbt::TagID::Long,
+            actual: na_nbt::TagID::Int,
+        })
+    ));
+
+    // Partial consumption of a FixedPrimSeq must leave unconsumed bytes and trigger Error::REMAIN
+    struct TakeOne;
+    impl<'de> serde::Deserialize<'de> for TakeOne {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = TakeOne;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("seq")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<TakeOne, A::Error> {
+                    let first: Option<i32> = seq.next_element()?;
+                    assert_eq!(first, Some(1));
+                    Ok(TakeOne)
+                }
+            }
+            d.deserialize_seq(V)
+        }
+    }
+    assert!(matches!(
+        from_slice_be::<TakeOne>(&root_int_arr),
+        Err(na_nbt::Error::REMAIN(4))
+    ));
 }

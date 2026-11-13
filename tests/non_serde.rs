@@ -1,9 +1,9 @@
 use zerocopy::byteorder;
 
 use na_nbt::{
-    AsCompoundRef, AsListRef, AsValueRef, BigEndian, ByteOrder, CompoundOwn, Error, ListOwn,
-    LittleEndian, TypedListOwn, ValueMut, ValueOwn, ValueRef, Writable, read_borrowed, read_owned,
-    tag,
+    read_borrowed, read_owned, tag, AsCompoundRef, AsListRef, AsValueRef, BigEndian, ByteOrder,
+    CompoundOwn, Error, ListOwn, LittleEndian, TypedListOwn, ValueMut, ValueOwn, ValueRef,
+    Writable,
 };
 
 fn canonical_dump<'s>(value: impl AsValueRef<'s>) -> String {
@@ -33,8 +33,14 @@ fn canonical_dump<'s>(value: impl AsValueRef<'s>) -> String {
             });
             assert_eq!(via_next, via_fold, "ListIter next vs fold mismatch");
             for (idx, expected) in via_next.iter().enumerate() {
-                let got = list.get(idx).expect("ListRef::get in-bounds should succeed");
-                assert_eq!(&canonical_dump(got), expected, "ListRef::get({idx}) mismatch");
+                let got = list
+                    .get(idx)
+                    .expect("ListRef::get in-bounds should succeed");
+                assert_eq!(
+                    &canonical_dump(got),
+                    expected,
+                    "ListRef::get({idx}) mismatch"
+                );
             }
             assert!(list.get(list.len()).is_none());
             format!("List({:?},[{}])", list.element_tag_id(), via_next.join(","))
@@ -134,8 +140,16 @@ fn assert_all_modes_parity_be(data: &[u8]) {
             }
         }
         (Err(e1), Err(e2), Err(e3)) => {
-            assert_eq!(err_kind(&e1), err_kind(&e2), "BE error mismatch: {e1:?} vs {e2:?}");
-            assert_eq!(err_kind(&e1), err_kind(&e3), "LE error mismatch: {e1:?} vs {e3:?}");
+            assert_eq!(
+                err_kind(&e1),
+                err_kind(&e2),
+                "BE error mismatch: {e1:?} vs {e2:?}"
+            );
+            assert_eq!(
+                err_kind(&e1),
+                err_kind(&e3),
+                "LE error mismatch: {e1:?} vs {e3:?}"
+            );
         }
         other => panic!(
             "Mode Ok/Err divergence: borrowed={:?}, owned_be={:?}, owned_le={:?}",
@@ -158,7 +172,11 @@ fn test_fuzz_corpus_and_hypixel_parity() {
             let o_le = read_owned::<LittleEndian, LittleEndian>(&data);
             let o_be = read_owned::<LittleEndian, BigEndian>(&data);
             assert_eq!(b_le.is_ok(), o_le.is_ok(), "LE parity failed on {path:?}");
-            assert_eq!(b_le.is_ok(), o_be.is_ok(), "LE->BE parity failed on {path:?}");
+            assert_eq!(
+                b_le.is_ok(),
+                o_be.is_ok(),
+                "LE->BE parity failed on {path:?}"
+            );
             if let (Ok(doc), Ok(own_le), Ok(own_be)) = (b_le, o_le, o_be) {
                 let d = canonical_dump(&doc);
                 assert_eq!(d, canonical_dump(&own_le));
@@ -229,13 +247,19 @@ fn test_all_tag_types_truncations_trailing_and_invalid_parity() {
     // Every strict prefix 0..full.len() must fail with EOF across all modes (and drop partial guards cleanly)
     for cut in 0..full.len() {
         let slice = &full[..cut];
-        assert!(matches!(read_borrowed::<BigEndian>(slice), Err(Error::EOF)), "cut={cut}");
+        assert!(
+            matches!(read_borrowed::<BigEndian>(slice), Err(Error::EOF)),
+            "cut={cut}"
+        );
         assert!(
             matches!(read_owned::<BigEndian, BigEndian>(slice), Err(Error::EOF)),
             "owned BE cut={cut}"
         );
         assert!(
-            matches!(read_owned::<BigEndian, LittleEndian>(slice), Err(Error::EOF)),
+            matches!(
+                read_owned::<BigEndian, LittleEndian>(slice),
+                Err(Error::EOF)
+            ),
             "owned LE cut={cut}"
         );
     }

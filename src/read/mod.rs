@@ -6,15 +6,16 @@ use std::{fmt, hint::unreachable_unchecked, io::Write, marker::PhantomData, ptr,
 use zerocopy::byteorder;
 
 use crate::{
-    Borrowed, ByteOrder, EMPTY_COMPOUND, EMPTY_LIST, MUTF8Str, Result, Source, Tag, TagID,
-    Writable, cold_path,
+    cold_path,
     index::Index,
     read::{
-        parser::{Mark, parse_marks},
-        view::{CompoundRef, ListRef, ValueRef, read_value_advance},
+        parser::{parse_marks, Mark},
+        view::{read_value_advance, CompoundRef, ListRef, ValueRef},
     },
     same_byte_order,
-    write::{ByteSink, IoSink, sink_to_vec, swap_u16, swap_u32, swap_u64},
+    write::{sink_to_vec, swap_u16, swap_u32, swap_u64, ByteSink, IoSink},
+    Borrowed, ByteOrder, MUTF8Str, Result, Source, Tag, TagID, Writable, EMPTY_COMPOUND,
+    EMPTY_LIST,
 };
 
 /// A zero-copy parsed NBT document backed by buffer `B` (`&[u8]`, `bytes::Bytes`, `Vec<u8>`, etc.).

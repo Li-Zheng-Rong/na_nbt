@@ -3,8 +3,8 @@ use std::{fmt, io::Write};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, Mut, Owned, Result,
-    ScalarMut, Tag, TagID, TypedListOwn, ValueRef, Writable, index::Index, tag,
+    index::Index, tag, ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, Mut,
+    Owned, Result, ScalarMut, Tag, TagID, TypedListOwn, ValueRef, Writable,
 };
 
 /// An owned, mutable NBT value.

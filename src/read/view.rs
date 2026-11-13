@@ -3,9 +3,9 @@ use std::{fmt, io::Write, marker::PhantomData};
 use zerocopy::byteorder;
 
 use crate::{
-    Borrowed, ByteOrder, CompoundOwn, Document, ElementTag, ListOwn, MUTF8Str, Mut, Owned, Result,
-    Source, Tag, TagID, ValueMut, ValueOwn, Writable, cold_path, index::Index, tag,
-    with_mutf8_key,
+    cold_path, index::Index, tag, with_mutf8_key, Borrowed, ByteOrder, CompoundOwn, Document,
+    ElementTag, ListOwn, MUTF8Str, Mut, Owned, Result, Source, Tag, TagID, ValueMut, ValueOwn,
+    Writable,
 };
 
 /// A lightweight `Copy` read-only view of any NBT value (borrowed or owned).
@@ -216,7 +216,9 @@ impl<'a, S: Source> CompoundRef<'a, S> {
 
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
-        with_mutf8_key(key, |k| unsafe { S::compound_get(self.cursor, k).is_some() })
+        with_mutf8_key(key, |k| unsafe {
+            S::compound_get(self.cursor, k).is_some()
+        })
     }
 
     #[inline]

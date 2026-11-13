@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use na_nbt::{
-    BigEndian, LittleEndian, Writable, read_borrowed, read_owned, read_owned_from_reader,
-    read_shared,
-};
 use na_nbt::{from_slice_be, from_slice_le, to_vec_be, to_vec_le};
+use na_nbt::{
+    read_borrowed, read_owned, read_owned_from_reader, read_shared, BigEndian, LittleEndian,
+    Writable,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -262,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // );
     // test_serde(data);
     // test_direct(data);
-    
+
     // let dir = r"D:\cmp\na_nbt\fuzz\hfuzz_workspace\hongg\input";
 
     // for entry in fs::read_dir(dir)? {
