@@ -1,18 +1,18 @@
 # na_nbt
 
-A high-performance NBT (Named Binary Tag) library for Rust with full mutation support and serde integration.
-see [documentation](https://docs.rs/na_nbt) for more details.
+A high-performance NBT (Named Binary Tag) library for Rust with zero-copy parsing, flat-buffer owned mutation, and seamless Serde integration.
+See [documentation](https://docs.rs/na_nbt) for full API details.
 
 > ⚠️ **Note:** This crate is under active development. APIs may change between versions.
 > Issues and contributions are welcome!
 
 ## Features
 
-- **Zero-copy parsing** - Read NBT data without allocating memory for values
-- **Full mutation** - Create and modify NBT structures with an owned representation
-- **Endianness support** - Convert between BigEndian and LittleEndian on read or write
-- **Serde integration** - Serialize/deserialize Rust types directly to/from NBT (optional)
-- **Shared values** - Thread-safe `Arc`-based values with `bytes` crate (optional)
+- **Zero-copy parsing** — Read NBT data with [`BorrowedDocument`](https://docs.rs/na_nbt/latest/na_nbt/type.BorrowedDocument.html) / [`SharedDocument`](https://docs.rs/na_nbt/latest/na_nbt/type.SharedDocument.html); small NBT documents (up to 8 containers) perform **zero heap allocations**
+- **Flat-buffer owned DOM** — Build and mutate [`Compound`](https://docs.rs/na_nbt/latest/na_nbt/struct.Compound.html), [`List`](https://docs.rs/na_nbt/latest/na_nbt/struct.List.html), [`TypedList`](https://docs.rs/na_nbt/latest/na_nbt/struct.TypedList.html), and [`Value`](https://docs.rs/na_nbt/latest/na_nbt/enum.Value.html) in place
+- **Ergonomic navigation & list views** — Chainable `at()` path queries, direct NBT-named getters (`get_int`, `get_str`, `get_string`, `get_compound`, ...), zero-copy list slices (`bytes`, `ints`, ...), and single-dispatch [`ListKind`](https://docs.rs/na_nbt/latest/na_nbt/enum.ListKind.html)
+- **Serde + DOM interoperability** — Derive `Serialize` / `Deserialize` on Rust structs and freely embed `Compound`, `Value`, `TypedList<T>`, `MUTF8String`, `&'a MUTF8Str`, or zero-copy `BorrowedDocument<'a>`
+- **Endianness & root formats** — Convert between `BigEndian` (Java Edition) and `LittleEndian` (Bedrock Edition) on read or write, with full support for named roots and Minecraft 1.20.2+ nameless network roots
 
 ## Installation
 
@@ -23,7 +23,7 @@ na_nbt = "0.2"
 
 ### Optional Features
 
-Both `serde` and `shared` features are enabled by default. To use without optional dependencies:
+`serde`, `shared`, and `i128` are enabled by default. To customize features:
 
 ```toml
 [dependencies]
@@ -33,16 +33,84 @@ na_nbt = { version = "0.2", default-features = false }
 na_nbt = { version = "0.2", default-features = false, features = ["serde"] }
 ```
 
-| Feature  | Description                                  | Dependencies |
-| -------- | -------------------------------------------- | ------------ |
-| `serde`  | Serialize/deserialize Rust types to/from NBT | `serde`      |
-| `shared` | `SharedValue` with Arc ownership             | `bytes`      |
+| Feature   | Default | Description                                                          | Dependencies |
+| --------- | ------- | -------------------------------------------------------------------- | ------------ |
+| `serde`   | Yes     | Serialize/deserialize Rust types and hybrid DOM structures           | `serde`      |
+| `shared`  | Yes     | `SharedDocument` backed by reference-counted `bytes::Bytes`          | `bytes`      |
+| `i128`    | Yes     | Map `i128` / `u128` (e.g. Minecraft UUIDs) to 4-element `IntArray`   | —            |
+| `nightly` | No      | Enable nightly SIMD acceleration in `simd_cesu8`                     | —            |
+
+## Quick Start
+
+### 1. Zero-Copy Borrowed Reading
+
+```rust
+use na_nbt::read_borrowed_be;
+
+fn inspect(bytes: &[u8]) -> na_nbt::Result<()> {
+    let doc = read_borrowed_be(bytes)?;
+
+    // Chainable `at()` returns `ValueRef::End` on missing keys or out-of-bounds indices
+    let health = doc.at("Player").at("Health").as_short().unwrap_or(20);
+    let first_x = doc.at("Player").at("Pos").at(0).as_double();
+
+    // Direct typed getters and zero-copy list views
+    if let Some(items) = doc.get_list("Inventory").and_then(|l| l.compounds()) {
+        for item in items {
+            let id = item.get_str("id");
+            let count = item.get_byte("Count").unwrap_or(1);
+            let _ = (health, first_x, id, count);
+        }
+    }
+    Ok(())
+}
+```
+
+### 2. Owned Building & In-Place Mutation
+
+```rust
+use na_nbt::{Compound, TypedList};
+
+let mut player = Compound::new();
+player.insert("Name", "Alex");
+player.insert("Health", 20i16);
+
+let mut pos = TypedList::<f64>::new();
+pos.extend_from_slice(&[100.5, 64.0, -200.25]);
+player.insert("Pos", pos);
+
+if let Some(mut hp) = player.get_short_mut("Health") {
+    *hp -= 4;
+}
+
+// Standard root (`[tag_id][name_len][name][payload]`) or 1.20.2+ nameless network root:
+let bytes = player.write_to_vec_be();
+let network_bytes = player.write_nameless_to_vec_be();
+```
+
+### 3. Serde + Hybrid DOM
+
+```rust
+use na_nbt::{from_slice_be, to_vec_be, BorrowedDocument, Compound};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct ItemSlot<'a> {
+    id: &'a str,
+    count: i8,
+    // Keep dynamic or version-dependent subtrees as zero-copy `BorrowedDocument` or mutable `Compound`!
+    #[serde(borrow)]
+    components: BorrowedDocument<'a>,
+    #[serde(flatten)]
+    extra: Compound,
+}
+```
 
 ## Todo
 
-- [ ] **More convenient APIs**
-- [ ] **Documentation**
-- [ ] **Tests and fuzzing**
+- [x] **More convenient APIs**
+- [x] **Documentation**
+- [x] **Tests and fuzzing**
 - [ ] **MSRV testing**
 - [ ] **`no_std` support**
 - [ ] **Older Rust support**
