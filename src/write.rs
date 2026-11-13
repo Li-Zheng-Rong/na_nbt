@@ -2,7 +2,25 @@ use std::{convert::Infallible, io::Write, mem::MaybeUninit, ptr, slice};
 
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, MUTF8Str, Result, TagID, Writable, same_byte_order};
+use crate::{ByteOrder, Error, MUTF8Str, MUTF8String, Result, TagID, same_byte_order};
+
+/// Serializes an NBT value to a byte vector or [`Write`] stream with a chosen target [`ByteOrder`].
+pub trait Writable {
+    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8>;
+    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()>;
+}
+
+impl<T: ?Sized + Writable> Writable for &T {
+    #[inline]
+    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
+        (**self).write_to_vec::<TARGET>()
+    }
+
+    #[inline]
+    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
+        (**self).write_to_writer::<TARGET>(writer)
+    }
+}
 
 #[inline(always)]
 pub(crate) fn swap_u16<O: ByteOrder, R: ByteOrder>(bytes: [u8; 2]) -> [u8; 2] {
@@ -188,66 +206,26 @@ macro_rules! impl_writable_delegate {
         }
     };
 }
-pub(crate) use impl_writable_delegate;
-
-macro_rules! impl_writable_value_enum {
-    ([$($generics:tt)*] $ty:ty) => {
-        impl<$($generics)*> Writable for $ty {
-            fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-                match self {
-                    Self::End(v) => v.write_to_vec::<TARGET>(),
-                    Self::Byte(v) => v.write_to_vec::<TARGET>(),
-                    Self::Short(v) => v.write_to_vec::<TARGET>(),
-                    Self::Int(v) => v.write_to_vec::<TARGET>(),
-                    Self::Long(v) => v.write_to_vec::<TARGET>(),
-                    Self::Float(v) => v.write_to_vec::<TARGET>(),
-                    Self::Double(v) => v.write_to_vec::<TARGET>(),
-                    Self::ByteArray(v) => v.write_to_vec::<TARGET>(),
-                    Self::String(v) => v.write_to_vec::<TARGET>(),
-                    Self::List(v) => v.write_to_vec::<TARGET>(),
-                    Self::Compound(v) => v.write_to_vec::<TARGET>(),
-                    Self::IntArray(v) => v.write_to_vec::<TARGET>(),
-                    Self::LongArray(v) => v.write_to_vec::<TARGET>(),
-                }
-            }
-
-            fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-                match self {
-                    Self::End(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Byte(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Short(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Int(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Long(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Float(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Double(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::ByteArray(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::String(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::List(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::Compound(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::IntArray(v) => v.write_to_writer::<TARGET>(writer),
-                    Self::LongArray(v) => v.write_to_writer::<TARGET>(writer),
-                }
-            }
-        }
-    };
-}
-pub(crate) use impl_writable_value_enum;
 
 impl Writable for () {
+    #[inline]
     fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
         vec![0]
     }
 
+    #[inline]
     fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
         writer.write_all(&[0]).map_err(Error::IO)
     }
 }
 
 impl Writable for i8 {
+    #[inline]
     fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
         vec![TagID::Byte as u8, 0, 0, *self as u8]
     }
 
+    #[inline]
     fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
         writer
             .write_all(&[TagID::Byte as u8, 0, 0, *self as u8])
@@ -257,14 +235,12 @@ impl Writable for i8 {
 
 macro_rules! impl_writable_primitive {
     ($prim:ty, $wrapper:ident, $tag:ident, $size:literal) => {
-        impl_writable_delegate!($prim => |self| byteorder::$wrapper::<TARGET>::new(*self));
-
-        impl<O: ByteOrder> Writable for byteorder::$wrapper<O> {
+        impl Writable for $prim {
             #[inline]
             fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
                 let mut buf = [0u8; 3 + $size];
                 buf[0] = TagID::$tag as u8;
-                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(self.get()).to_bytes());
+                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(*self).to_bytes());
                 buf.to_vec()
             }
 
@@ -272,10 +248,12 @@ macro_rules! impl_writable_primitive {
             fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
                 let mut buf = [0u8; 3 + $size];
                 buf[0] = TagID::$tag as u8;
-                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(self.get()).to_bytes());
+                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(*self).to_bytes());
                 writer.write_all(&buf).map_err(Error::IO)
             }
         }
+
+        impl_writable_delegate!([O: ByteOrder] byteorder::$wrapper<O> => |self| self.get());
     };
 }
 
@@ -304,6 +282,7 @@ impl Writable for [i8] {
 }
 
 impl_writable_delegate!([const N: usize] [i8; N] => |self| self.as_slice());
+impl_writable_delegate!(Vec<i8> => |self| self.as_slice());
 
 impl Writable for MUTF8Str {
     fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
@@ -322,6 +301,8 @@ impl Writable for MUTF8Str {
         IoSink(writer).write_2(&hdr, bytes)
     }
 }
+
+impl_writable_delegate!(MUTF8String => |self| self.as_mutf8_str());
 
 macro_rules! impl_writable_endian_array {
     ($wrapper:ident, $tag:ident, $elem_size:literal, $swap:ident) => {
@@ -349,6 +330,9 @@ macro_rules! impl_writable_endian_array {
 
         impl_writable_delegate!(
             [O: ByteOrder, const N: usize] [byteorder::$wrapper<O>; N] => |self| self.as_slice()
+        );
+        impl_writable_delegate!(
+            [O: ByteOrder] Vec<byteorder::$wrapper<O>> => |self| self.as_slice()
         );
     };
 }

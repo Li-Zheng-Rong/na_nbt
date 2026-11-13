@@ -2,10 +2,16 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 
 use zerocopy::byteorder;
 
-use crate::{
-    ByteOrder, Error, Result, cold_path,
-    immutable::{mark::Mark, size::tag_elem_size},
-};
+use crate::{ByteOrder, Error, Result, TagID, cold_path};
+
+#[derive(Copy, Clone, Default, Debug)]
+#[repr(C)]
+pub(crate) struct Mark {
+    /// Byte length of this `List` or `Compound` payload.
+    pub byte_len: u32,
+    /// Distance to the next sibling mark in the flat array (`1 + nested marks`).
+    pub flat_next_mark: u32,
+}
 
 const INLINE_STACK_CAP: usize = 32;
 
@@ -97,7 +103,8 @@ impl MarkBuf {
     #[inline(never)]
     fn reserve_slow(&mut self, additional: usize, rem_bytes: usize) {
         if self.0.capacity() == 0 {
-            self.0.reserve_exact((1 + rem_bytes / 24).max(8).max(additional));
+            self.0
+                .reserve_exact((1 + rem_bytes / 24).max(8).max(additional));
         } else {
             self.0.reserve(additional);
         }
@@ -214,7 +221,7 @@ unsafe fn parse_list<O: ByteOrder>(
 
         match elem_type {
             0..=6 => {
-                let Some(bytes) = count.checked_mul(tag_elem_size(elem_type)) else {
+                let Some(bytes) = count.checked_mul(TagID::elem_size_raw(elem_type)) else {
                     cold_path();
                     return Err(Error::EOF);
                 };
@@ -226,7 +233,7 @@ unsafe fn parse_list<O: ByteOrder>(
                 Ok(ListNext::Leaf(pos.add(bytes)))
             }
             7 | 11 | 12 => {
-                let elem_size = tag_elem_size(elem_type);
+                let elem_size = TagID::elem_size_raw(elem_type);
                 if count.checked_mul(4).is_none_or(|min| rem_after < min) {
                     cold_path();
                     return Err(Error::EOF);
@@ -288,11 +295,9 @@ unsafe fn parse_list<O: ByteOrder>(
     }
 }
 
-pub unsafe fn read_unsafe<O: ByteOrder, R>(
-    mut pos: *const u8,
-    len: usize,
-    f: impl FnOnce(Vec<Mark>) -> R,
-) -> Result<R> {
+pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
+    let mut pos = src.as_ptr();
+    let len = src.len();
     if len == 0 {
         cold_path();
         return Err(Error::EOF);
@@ -307,7 +312,7 @@ pub unsafe fn read_unsafe<O: ByteOrder, R>(
         let root_tag = *pos;
         if root_tag == 0 {
             cold_path();
-            return Ok(f(Vec::new()));
+            return Ok(Vec::new());
         }
 
         if len < 3 {
@@ -339,7 +344,7 @@ pub unsafe fn read_unsafe<O: ByteOrder, R>(
                 cold_path();
                 let end = match root_tag {
                     1..=6 => {
-                        let size = tag_elem_size(root_tag);
+                        let size = TagID::elem_size_raw(root_tag);
                         if rem < size {
                             cold_path();
                             return Err(Error::EOF);
@@ -347,13 +352,13 @@ pub unsafe fn read_unsafe<O: ByteOrder, R>(
                         pos.add(size)
                     }
                     8 => skip_str::<O>(pos, end_pos)?,
-                    _ => skip_array::<O>(pos, end_pos, tag_elem_size(root_tag))?,
+                    _ => skip_array::<O>(pos, end_pos, TagID::elem_size_raw(root_tag))?,
                 };
                 if end != end_pos {
                     cold_path();
                     return Err(Error::REMAIN((end_pos as usize) - (end as usize)));
                 }
-                return Ok(f(Vec::new()));
+                return Ok(Vec::new());
             }
             9 => mode = Mode::ListElement,
             10 => {
@@ -374,7 +379,7 @@ pub unsafe fn read_unsafe<O: ByteOrder, R>(
                             cold_path();
                             return Err(Error::REMAIN((end_pos as usize) - (pos as usize)));
                         }
-                        return Ok(f(mark.into_vec()));
+                        return Ok(mark.into_vec());
                     }
                     let top = stack.last_mut();
                     match top.kind {
@@ -455,14 +460,16 @@ pub unsafe fn read_unsafe<O: ByteOrder, R>(
 
                     match tag_id {
                         1..=6 => {
-                            let size = tag_elem_size(tag_id);
+                            let size = TagID::elem_size_raw(tag_id);
                             if rem_val < size {
                                 cold_path();
                                 return Err(Error::EOF);
                             }
                             pos = pos.add(size);
                         }
-                        7 | 11 | 12 => pos = skip_array::<O>(pos, end_pos, tag_elem_size(tag_id))?,
+                        7 | 11 | 12 => {
+                            pos = skip_array::<O>(pos, end_pos, TagID::elem_size_raw(tag_id))?
+                        }
                         8 => pos = skip_str::<O>(pos, end_pos)?,
                         9 => match parse_list::<O>(pos, end_pos, &mut mark)? {
                             ListNext::Leaf(end) => pos = end,

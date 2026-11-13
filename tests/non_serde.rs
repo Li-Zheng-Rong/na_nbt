@@ -1,48 +1,48 @@
 use zerocopy::byteorder;
 
 use na_nbt::{
-    BigEndian, CompoundOwn, CompoundRef, Error, ListBase, ListOwn, ListRef, LittleEndian,
-    TypedListRef, ValueBase, ValueOwn, ValueRef, VisitRef, Writable, read_borrowed, read_owned,
+    AsCompoundRef, AsListRef, AsValueRef, BigEndian, ByteOrder, CompoundOwn, Error, ListOwn,
+    LittleEndian, TypedListOwn, ValueMut, ValueOwn, ValueRef, Writable, read_borrowed, read_owned,
     tag,
 };
 
-fn canonical_dump<'s, V: ValueRef<'s>>(value: &V) -> String {
-    value.visit(|v| match v {
-        VisitRef::End(_) => "End".to_string(),
-        VisitRef::Byte(x) => format!("B({x})"),
-        VisitRef::Short(x) => format!("S({x})"),
-        VisitRef::Int(x) => format!("I({x})"),
-        VisitRef::Long(x) => format!("L({x})"),
-        VisitRef::Float(x) => format!("F({:08x})", x.to_bits()),
-        VisitRef::Double(x) => format!("D({:016x})", x.to_bits()),
-        VisitRef::ByteArray(a) => format!("BA({:?})", &**a),
-        VisitRef::String(s) => format!("Str({:?})", s.as_bytes()),
-        VisitRef::IntArray(a) => {
+fn canonical_dump<'s>(value: impl AsValueRef<'s>) -> String {
+    match value.as_value_ref() {
+        ValueRef::End => "End".to_string(),
+        ValueRef::Byte(x) => format!("B({x})"),
+        ValueRef::Short(x) => format!("S({x})"),
+        ValueRef::Int(x) => format!("I({x})"),
+        ValueRef::Long(x) => format!("L({x})"),
+        ValueRef::Float(x) => format!("F({:08x})", x.to_bits()),
+        ValueRef::Double(x) => format!("D({:016x})", x.to_bits()),
+        ValueRef::ByteArray(a) => format!("BA({a:?})"),
+        ValueRef::String(s) => format!("Str({:?})", s.as_bytes()),
+        ValueRef::IntArray(a) => {
             let vals: Vec<i32> = a.iter().map(|e| e.get()).collect();
             format!("IA({vals:?})")
         }
-        VisitRef::LongArray(a) => {
+        ValueRef::LongArray(a) => {
             let vals: Vec<i64> = a.iter().map(|e| e.get()).collect();
             format!("LA({vals:?})")
         }
-        VisitRef::List(list) => {
-            let via_next: Vec<String> = list.iter().map(|item| canonical_dump(&item)).collect();
+        ValueRef::List(list) => {
+            let via_next: Vec<String> = list.iter().map(canonical_dump).collect();
             let mut via_fold = Vec::with_capacity(list.len());
-            list.clone().into_iter().for_each(|item| {
-                via_fold.push(canonical_dump(&item));
+            list.into_iter().for_each(|item| {
+                via_fold.push(canonical_dump(item));
             });
             assert_eq!(via_next, via_fold, "ListIter next vs fold mismatch");
             for (idx, expected) in via_next.iter().enumerate() {
                 let got = list.get(idx).expect("ListRef::get in-bounds should succeed");
-                assert_eq!(&canonical_dump(&got), expected, "ListRef::get({idx}) mismatch");
+                assert_eq!(&canonical_dump(got), expected, "ListRef::get({idx}) mismatch");
             }
             assert!(list.get(list.len()).is_none());
             format!("List({:?},[{}])", list.element_tag_id(), via_next.join(","))
         }
-        VisitRef::Compound(comp) => {
+        ValueRef::Compound(comp) => {
             let mut parts = Vec::new();
             for (k, val) in comp.iter() {
-                let dumped = canonical_dump(&val);
+                let dumped = canonical_dump(val);
                 if let Ok(key_str) = std::str::from_utf8(k.as_bytes()) {
                     if !key_str.contains('\0') {
                         let looked_up = comp.get(key_str).expect("CompoundRef::get existing key");
@@ -54,7 +54,7 @@ fn canonical_dump<'s, V: ValueRef<'s>>(value: &V) -> String {
             assert!(comp.get("__non_existent_probe_key__").is_none());
             format!("Comp({{{}}})", parts.join(","))
         }
-    })
+    }
 }
 
 fn err_kind(e: &Error) -> (u8, usize) {
@@ -73,13 +73,15 @@ fn assert_all_modes_parity_be(data: &[u8]) {
     let o_le_res = read_owned::<BigEndian, LittleEndian>(data);
 
     match (b_res, o_be_res, o_le_res) {
-        (Ok(b_doc), Ok(o_be), Ok(o_le)) => {
+        (Ok(b_doc), Ok(mut o_be), Ok(o_le)) => {
             let b_root = b_doc.root();
-            let d1 = canonical_dump(&b_root);
-            let d2 = canonical_dump(&o_be.to_ref());
-            let d3 = canonical_dump(&o_le.to_ref());
+            let d1 = canonical_dump(&b_doc);
+            let d2 = canonical_dump(&o_be);
+            let d3 = canonical_dump(&o_le);
+            let d4 = canonical_dump(&o_be.as_mut());
             assert_eq!(d1, d2, "borrowed vs owned<BE,BE> mismatch");
             assert_eq!(d1, d3, "borrowed vs owned<BE,LE> mismatch");
+            assert_eq!(d1, d4, "borrowed vs ValueMut<BE> mismatch");
 
             #[cfg(feature = "shared")]
             {
@@ -126,9 +128,9 @@ fn assert_all_modes_parity_be(data: &[u8]) {
                 assert_eq!(w_ole_le, round_le);
 
                 let reparsed = read_borrowed::<BigEndian>(&round_be).unwrap();
-                assert_eq!(d1, canonical_dump(&reparsed.root()));
+                assert_eq!(d1, canonical_dump(&reparsed));
                 let reparsed_le = read_borrowed::<LittleEndian>(&round_le).unwrap();
-                assert_eq!(d1, canonical_dump(&reparsed_le.root()));
+                assert_eq!(d1, canonical_dump(&reparsed_le));
             }
         }
         (Err(e1), Err(e2), Err(e3)) => {
@@ -158,9 +160,9 @@ fn test_fuzz_corpus_and_hypixel_parity() {
             assert_eq!(b_le.is_ok(), o_le.is_ok(), "LE parity failed on {path:?}");
             assert_eq!(b_le.is_ok(), o_be.is_ok(), "LE->BE parity failed on {path:?}");
             if let (Ok(doc), Ok(own_le), Ok(own_be)) = (b_le, o_le, o_be) {
-                let d = canonical_dump(&doc.root());
-                assert_eq!(d, canonical_dump(&own_le.to_ref()));
-                assert_eq!(d, canonical_dump(&own_be.to_ref()));
+                let d = canonical_dump(&doc);
+                assert_eq!(d, canonical_dump(&own_le));
+                assert_eq!(d, canonical_dump(&own_be));
             }
         }
     }
@@ -182,8 +184,8 @@ fn test_all_tag_types_truncations_trailing_and_invalid_parity() {
     root.insert("str", "hello_mutf8");
     root.insert("ba_empty", Vec::<i8>::new());
     root.insert("ba", vec![1i8, -2, 3, -4]);
-    root.insert("ia", vec![byteorder::I32::<BigEndian>::new(10), (-20).into()]);
-    root.insert("la", vec![byteorder::I64::<BigEndian>::new(100), (-200).into()]);
+    root.insert("ia", vec![10i32, -20]);
+    root.insert("la", vec![100i64, -200]);
     root.insert("empty_comp", CompoundOwn::<BigEndian>::default());
 
     let mut list_ba = ListOwn::<BigEndian>::default();
@@ -192,11 +194,11 @@ fn test_all_tag_types_truncations_trailing_and_invalid_parity() {
     root.insert("list_ba", list_ba);
 
     let mut list_ia = ListOwn::<BigEndian>::default();
-    list_ia.push(vec![byteorder::I32::<BigEndian>::new(7), 8.into()]);
+    list_ia.push([7i32, 8]);
     root.insert("list_ia", list_ia);
 
     let mut list_la = ListOwn::<BigEndian>::default();
-    list_la.push(vec![byteorder::I64::<BigEndian>::new(99)]);
+    list_la.push([99i64].as_slice());
     root.insert("list_la", list_la);
 
     let mut list_str = ListOwn::<BigEndian>::default();
@@ -324,34 +326,29 @@ fn test_root_variants_deep_nesting_keys_and_overflow_bounds() {
     }
     let key_bytes = ValueOwn::Compound(key_comp).write_to_vec::<BigEndian>();
     let bdoc = read_borrowed::<BigEndian>(&key_bytes).unwrap();
-    let broot = bdoc.root().into_::<tag::Compound>().unwrap();
-    let mut odoc = match read_owned::<BigEndian, BigEndian>(&key_bytes).unwrap() {
-        ValueOwn::Compound(c) => c,
-        _ => unreachable!(),
-    };
+    let broot = bdoc.root().as_::<tag::Compound>().unwrap();
+    let mut odoc = read_owned::<BigEndian, BigEndian>(&key_bytes)
+        .unwrap()
+        .into_::<tag::Compound>()
+        .unwrap();
     for klen in 0..=24usize {
         let key: String = (0..klen).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        assert_eq!(broot.get_::<tag::Int>(&key), Some(klen as i32));
-        assert_eq!(odoc.get_::<tag::Int>(&key), Some(klen as i32));
+        assert_eq!(broot.get_as::<tag::Int>(&key), Some(klen as i32));
+        assert_eq!(odoc.get_as::<tag::Int>(&key), Some(klen as i32));
         if klen > 0 {
             let mut miss = key.into_bytes();
             miss[klen - 1] = b'Z';
             let miss = String::from_utf8(miss).unwrap();
-            assert_eq!(broot.get_::<tag::Int>(&miss), None);
-            assert_eq!(odoc.get_::<tag::Int>(&miss), None);
+            assert_eq!(broot.get_as::<tag::Int>(&miss), None);
+            assert_eq!(odoc.get_as::<tag::Int>(&miss), None);
         }
     }
     let overlong_key = "x".repeat(usize::from(u16::MAX) + 1);
     assert!(broot.get(&overlong_key).is_none());
     assert!(odoc.get(&overlong_key).is_none());
     assert!(odoc.remove(&overlong_key).is_none());
-    assert_eq!(
-        odoc.remove("abcdef").and_then(|v| match v {
-            ValueOwn::Int(x) => Some(x.get()),
-            _ => None,
-        }),
-        Some(6)
-    );
+    assert_eq!(odoc.remove_as::<tag::String>("abcdef"), None);
+    assert_eq!(odoc.remove_as::<tag::Int>("abcdef"), Some(6));
     assert!(odoc.get("abcdef").is_none());
 
     let mut tl_root = CompoundOwn::<BigEndian>::default();
@@ -366,11 +363,14 @@ fn test_root_variants_deep_nesting_keys_and_overflow_bounds() {
     let tl_doc = read_borrowed::<BigEndian>(&tl_bytes).unwrap();
     let typed = tl_doc
         .root()
-        .get_::<tag::TypedList<tag::Compound>>("items")
+        .get_as::<tag::TypedList<tag::Compound>>("items")
         .unwrap();
-    let collected: Vec<i32> = typed.iter().map(|c| c.get_::<tag::Int>("n").unwrap()).collect();
+    let collected: Vec<i32> = typed
+        .iter()
+        .map(|c| c.get_as::<tag::Int>("n").unwrap())
+        .collect();
     assert_eq!(collected, vec![0, 1, 2, 3, 4]);
-    assert_eq!(typed.get(3).unwrap().get_::<tag::Int>("n"), Some(3));
+    assert_eq!(typed.get(3).unwrap().get_as::<tag::Int>("n"), Some(3));
 
     assert_all_modes_parity_be(&[13, 0, 0]);
     assert_all_modes_parity_be(&[10, 0, 0, 99, 0, 1, b'a', 0]);
@@ -385,13 +385,11 @@ fn test_root_variants_deep_nesting_keys_and_overflow_bounds() {
 
 #[test]
 fn test_typed_list_dispatch_and_mutation_safety() {
-    use na_nbt::{ListMut, TypedListOwn, ValueMut};
-
-    // ListOwn::typed_ mismatch returns None without leaking
+    // ListOwn::into_typed mismatch returns None without leaking
     let mut str_list = ListOwn::<BigEndian>::default();
     str_list.push("alpha");
     str_list.push("beta");
-    assert!(str_list.typed_::<tag::Int>().is_none());
+    assert!(str_list.into_typed::<tag::Int>().is_none());
 
     // Nested List of Lists with heterogeneous inner element types
     let mut outer = ListOwn::<BigEndian>::default();
@@ -403,23 +401,23 @@ fn test_typed_list_dispatch_and_mutation_safety() {
     outer.push(inner_ints);
     outer.push(inner_strs);
 
-    // Mismatched pop_ / remove_ must return None and leave outer untouched
-    assert!(outer.pop_::<tag::TypedList<tag::Int>>().is_none());
+    // Mismatched pop_as / remove_as must return None and leave outer untouched
+    assert!(outer.pop_as::<tag::TypedList<tag::Int>>().is_none());
     assert_eq!(outer.len(), 2);
-    assert!(outer.remove_::<tag::TypedList<tag::Int>>(1).is_none());
+    assert!(outer.remove_as::<tag::TypedList<tag::Int>>(1).is_none());
     assert_eq!(outer.len(), 2);
 
-    // Matching remove_ on index 0 succeeds and leaves the String list at index 0
-    let removed = outer.remove_::<tag::TypedList<tag::Int>>(0).unwrap();
+    // Matching remove_as on index 0 succeeds and leaves the String list at index 0
+    let removed = outer.remove_as::<tag::TypedList<tag::Int>>(0).unwrap();
     assert_eq!(removed.len(), 2);
     assert_eq!(removed.get(1), Some(20));
     assert_eq!(outer.len(), 1);
-    let popped_strs = outer.pop_::<tag::TypedList<tag::String>>().unwrap();
+    let popped_strs = outer.pop_as::<tag::TypedList<tag::String>>().unwrap();
     assert_eq!(popped_strs.len(), 1);
     assert_eq!(&*popped_strs.get(0).unwrap().decode_lossy(), "hello");
     assert!(outer.is_empty());
 
-    // Same via ListMut / ValueMut
+    // Same via Mut<ListOwn<O>> / ValueMut
     let mut root = ValueOwn::List({
         let mut l = ListOwn::<BigEndian>::default();
         let mut i = TypedListOwn::<BigEndian, tag::Int>::default();
@@ -431,15 +429,15 @@ fn test_typed_list_dispatch_and_mutation_safety() {
         l
     });
     {
-        let mut mv = root.to_mut().into_::<tag::List>().unwrap();
-        assert!(mv.get_::<tag::TypedList<tag::Int>>(0).is_some());
-        assert!(mv.get_::<tag::TypedList<tag::Int>>(1).is_none());
-        assert!(mv.get_mut_::<tag::TypedList<tag::Int>>(1).is_none());
-        assert!(mv.pop_::<tag::TypedList<tag::Int>>().is_none());
+        let mut mv = root.as_mut_::<tag::List>().unwrap();
+        assert!(mv.get_as::<tag::TypedList<tag::Int>>(0).is_some());
+        assert!(mv.get_as::<tag::TypedList<tag::Int>>(1).is_none());
+        assert!(mv.get_mut_as::<tag::TypedList<tag::Int>>(1).is_none());
+        assert!(mv.pop_as::<tag::TypedList<tag::Int>>().is_none());
         assert_eq!(mv.len(), 2);
-        let s = mv.pop_::<tag::TypedList<tag::String>>().unwrap();
+        let s = mv.pop_as::<tag::TypedList<tag::String>>().unwrap();
         assert_eq!(s.len(), 1);
-        let i = mv.pop_::<tag::TypedList<tag::Int>>().unwrap();
+        let i = mv.pop_as::<tag::TypedList<tag::Int>>().unwrap();
         assert_eq!(i.get(0), Some(7));
         assert!(mv.is_empty());
     }
@@ -479,13 +477,13 @@ fn test_typed_list_dispatch_and_mutation_safety() {
     comp.insert("tl_ba", tl_ba);
 
     let mut tl_ia = TypedListOwn::<BigEndian, tag::IntArray>::default();
-    tl_ia.push(vec![byteorder::I32::<BigEndian>::new(11), 22.into()]);
-    tl_ia.push(vec![byteorder::I32::<BigEndian>::new(33)]);
+    tl_ia.push(vec![11i32, 22]);
+    tl_ia.push([33i32]);
     comp.insert("tl_ia", tl_ia);
 
     let mut tl_la = TypedListOwn::<BigEndian, tag::LongArray>::default();
-    tl_la.push(vec![byteorder::I64::<BigEndian>::new(111)]);
-    tl_la.push(vec![byteorder::I64::<BigEndian>::new(222), 333.into()]);
+    tl_la.push([111i64]);
+    tl_la.push(vec![222i64, 333]);
     comp.insert("tl_la", tl_la);
 
     let mut tl_str = TypedListOwn::<BigEndian, tag::String>::default();
@@ -508,61 +506,252 @@ fn test_typed_list_dispatch_and_mutation_safety() {
 
     let bytes = ValueOwn::Compound(comp).write_to_vec::<BigEndian>();
     let bdoc = read_borrowed::<BigEndian>(&bytes).unwrap();
-    let broot = bdoc.root().into_::<tag::Compound>().unwrap();
+    let broot = bdoc.root().as_::<tag::Compound>().unwrap();
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::Byte>>("tl_byte").unwrap().iter().sum::<i8>(),
+        broot
+            .get_as::<tag::TypedList<tag::Byte>>("tl_byte")
+            .unwrap()
+            .iter()
+            .sum::<i8>(),
         6
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::Short>>("tl_short").unwrap().get(1),
+        broot
+            .get_as::<tag::TypedList<tag::Short>>("tl_short")
+            .unwrap()
+            .get(1),
         Some(200)
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::Long>>("tl_long").unwrap().iter().sum::<i64>(),
+        broot
+            .get_as::<tag::TypedList<tag::Long>>("tl_long")
+            .unwrap()
+            .iter()
+            .sum::<i64>(),
         3000
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::Float>>("tl_float").unwrap().get(1),
+        broot
+            .get_as::<tag::TypedList<tag::Float>>("tl_float")
+            .unwrap()
+            .get(1),
         Some(2.5)
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::Double>>("tl_double").unwrap().get(1),
+        broot
+            .get_as::<tag::TypedList<tag::Double>>("tl_double")
+            .unwrap()
+            .get(1),
         Some(4.5)
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::ByteArray>>("tl_ba").unwrap().get(1).unwrap().len(),
+        broot
+            .get_as::<tag::TypedList<tag::ByteArray>>("tl_ba")
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .len(),
         3
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::IntArray>>("tl_ia").unwrap().get(1).unwrap()[0].get(),
+        broot
+            .get_as::<tag::TypedList<tag::IntArray>>("tl_ia")
+            .unwrap()
+            .get(1)
+            .unwrap()[0]
+            .get(),
         33
     );
     assert_eq!(
-        broot.get_::<tag::TypedList<tag::LongArray>>("tl_la").unwrap().get(1).unwrap()[1].get(),
+        broot
+            .get_as::<tag::TypedList<tag::LongArray>>("tl_la")
+            .unwrap()
+            .get(1)
+            .unwrap()[1]
+            .get(),
         333
     );
     let b_strs: Vec<String> = broot
-        .get_::<tag::TypedList<tag::String>>("tl_str")
+        .get_as::<tag::TypedList<tag::String>>("tl_str")
         .unwrap()
         .iter()
         .map(|s| s.to_utf8_string())
         .collect();
     assert_eq!(b_strs, vec!["first", "second_new!"]);
 
-    // Owned ref + mut static dispatch (including MutTypedListIter::fold and TypedListMut::pop/remove)
+    // Owned ref + mut static dispatch (including TypedListIterMut::fold and TypedListOwn::pop/remove via Mut)
     let mut own = read_owned::<BigEndian, BigEndian>(&bytes).unwrap();
     {
-        use na_nbt::{CompoundMut, TypedListBase, TypedListMut};
-        let mut c_mut = own.to_mut().into_::<tag::Compound>().unwrap();
-        let mut s_list = c_mut.get_mut_::<tag::TypedList<tag::Short>>("tl_short").unwrap();
-        s_list.iter_mut().for_each(|x| x.set(x.get() + 1));
-        assert_eq!(s_list.get(0), Some(101));
-        assert_eq!(s_list.remove(0).unwrap().get(), 101);
-        assert_eq!(s_list.pop().unwrap().get(), 201);
-        assert!(s_list.is_empty());
+        let mut c_mut = own.as_mut_::<tag::Compound>().unwrap();
+        {
+            let mut s_list = c_mut
+                .get_mut_as::<tag::TypedList<tag::Short>>("tl_short")
+                .unwrap();
+            s_list.iter_mut().for_each(|mut x| *x += 1);
+            assert_eq!(s_list.get(0), Some(101));
+            assert_eq!(s_list.remove(0), Some(101));
+            assert_eq!(s_list.pop(), Some(201));
+            assert!(s_list.is_empty());
+        }
 
-        let mut ba_list = c_mut.get_mut_::<tag::TypedList<tag::ByteArray>>("tl_ba").unwrap();
+        let mut ba_list = c_mut
+            .get_mut_as::<tag::TypedList<tag::ByteArray>>("tl_ba")
+            .unwrap();
         ba_list.get_mut(1).unwrap().push(6);
         assert_eq!(ba_list.get(1).unwrap().len(), 4);
     }
+}
+
+#[test]
+fn test_generic_code_reuse_compound_replace_and_clone() {
+    // 1. Generic container mutation via &mut CompoundOwn<O> / &mut ListOwn<O> (works for owned & Mut<'_, _>!)
+    fn stamp_metadata<O: ByteOrder>(comp: &mut CompoundOwn<O>, version: i32) {
+        comp.insert("version", version);
+        comp.insert("author", "na_nbt");
+    }
+
+    fn append_seq<O: ByteOrder>(list: &mut ListOwn<O>, start: i32) {
+        list.push(start);
+        list.push(start + 1);
+    }
+
+    // 2. Generic dynamic mutation via Into<ValueMut<'a, O>>
+    fn increment_all_ints<'a, O: ByteOrder>(v: impl Into<ValueMut<'a, O>>, delta: i32) {
+        match v.into() {
+            ValueMut::Int(mut x) => *x += delta,
+            ValueMut::List(mut l) => {
+                for elem in l.iter_mut() {
+                    increment_all_ints(elem, delta);
+                }
+            }
+            ValueMut::Compound(mut c) => {
+                for (_, val) in c.iter_mut() {
+                    increment_all_ints(val, delta);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Generic read-only helpers via AsCompoundRef / AsListRef
+    fn read_version<'a>(comp: impl AsCompoundRef<'a>) -> Option<i32> {
+        comp.as_compound_ref().get_as::<tag::Int>("version")
+    }
+
+    fn sum_int_list<'a>(list: impl AsListRef<'a>) -> i32 {
+        list.as_list_ref()
+            .typed::<tag::Int>()
+            .map(|tl| tl.iter().sum())
+            .unwrap_or(0)
+    }
+
+    let mut root = CompoundOwn::<LittleEndian>::new();
+    stamp_metadata(&mut root, 1);
+
+    let mut child = CompoundOwn::<LittleEndian>::new();
+    let mut nums = ListOwn::<LittleEndian>::new();
+    append_seq(&mut nums, 10);
+    child.insert("nums", nums);
+    root.insert("child", child);
+
+    // Invoke the exact same &mut CompoundOwn / &mut ListOwn functions on Mut<'_, _> guards!
+    {
+        let mut child_guard = root.get_mut_as::<tag::Compound>("child").unwrap();
+        stamp_metadata(&mut child_guard, 2);
+        {
+            let mut nums_guard = child_guard.get_mut_as::<tag::List>("nums").unwrap();
+            append_seq(&mut nums_guard, 20);
+            assert_eq!(sum_int_list(&nums_guard), 10 + 11 + 20 + 21);
+        }
+        assert_eq!(read_version(&child_guard), Some(2));
+    }
+
+    assert_eq!(read_version(&root), Some(1));
+    assert_eq!(read_version(root.as_ref()), Some(1));
+
+    // Dynamic mutation on &mut CompoundOwn, &mut ValueOwn, and ValueMut
+    increment_all_ints(&mut root, 100);
+    assert_eq!(read_version(&root), Some(101));
+
+    let mut val = ValueOwn::Compound(root);
+    increment_all_ints(&mut val, 1000);
+    increment_all_ints(val.as_mut(), 1000);
+    assert_eq!(val.get_as::<tag::Int>("version"), Some(2101));
+    let child_ref = val.get_as::<tag::Compound>("child").unwrap();
+    assert_eq!(read_version(child_ref), Some(2102));
+    assert_eq!(
+        sum_int_list(child_ref.get_as::<tag::List>("nums").unwrap()),
+        2110 + 2111 + 2120 + 2121
+    );
+
+    // 4. Single-pass CompoundOwn::insert replacement with equal, larger, and smaller inline sizes
+    let mut rep = CompoundOwn::<BigEndian>::new();
+    rep.insert("head", 11i8);
+    rep.insert("mid", 22i8); // 1 byte inline
+    rep.insert("tail", "keep_tail");
+
+    // Equal inline size: Byte (1) -> Byte (1)
+    assert!(matches!(rep.insert("mid", 33i8), Some(ValueOwn::Byte(22))));
+    assert_eq!(rep.get_as::<tag::Byte>("mid"), Some(33));
+    assert_eq!(
+        rep.get_as::<tag::String>("tail").unwrap().to_utf8_string(),
+        "keep_tail"
+    );
+
+    // Grow inline size: Byte (1) -> String (24 bytes SIZE_DYN)
+    assert!(matches!(
+        rep.insert("mid", "expanded_string_payload"),
+        Some(ValueOwn::Byte(33))
+    ));
+    assert_eq!(rep.get_as::<tag::Byte>("head"), Some(11));
+    assert_eq!(
+        rep.get_as::<tag::String>("mid").unwrap().to_utf8_string(),
+        "expanded_string_payload"
+    );
+    assert_eq!(
+        rep.get_as::<tag::String>("tail").unwrap().to_utf8_string(),
+        "keep_tail"
+    );
+
+    // Shrink inline size: String (24) -> Short (2)
+    let prev_str = rep.insert("mid", 777i16).unwrap();
+    assert_eq!(
+        prev_str.into_::<tag::String>().unwrap().to_utf8_string(),
+        "expanded_string_payload"
+    );
+    assert_eq!(rep.get_as::<tag::Short>("mid"), Some(777));
+    assert_eq!(rep.get_as::<tag::Byte>("head"), Some(11));
+    assert_eq!(
+        rep.get_as::<tag::String>("tail").unwrap().to_utf8_string(),
+        "keep_tail"
+    );
+
+    // 5. Deep Clone independence on CompoundOwn / ListOwn / TypedListOwn / ValueOwn
+    let mut orig_tl = TypedListOwn::<BigEndian, tag::String>::new();
+    orig_tl.push("one");
+    orig_tl.push("two");
+    rep.insert("words", orig_tl);
+
+    let mut cloned = rep.clone();
+    cloned.insert("head", 99i8);
+    cloned
+        .get_mut_as::<tag::TypedList<tag::String>>("words")
+        .unwrap()
+        .push("three");
+
+    assert_eq!(rep.get_as::<tag::Byte>("head"), Some(11));
+    assert_eq!(
+        rep.get_as::<tag::TypedList<tag::String>>("words")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(cloned.get_as::<tag::Byte>("head"), Some(99));
+    assert_eq!(
+        cloned
+            .get_as::<tag::TypedList<tag::String>>("words")
+            .unwrap()
+            .len(),
+        3
+    );
 }

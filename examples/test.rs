@@ -1,12 +1,11 @@
 use bytes::Bytes;
 use na_nbt::{
-    BigEndian, LittleEndian, TypedListRef, ValueMut, Writable, read_borrowed, read_owned,
-    read_owned_from_reader, read_shared,
+    BigEndian, LittleEndian, Writable, read_borrowed, read_owned, read_owned_from_reader,
+    read_shared,
 };
 use na_nbt::{from_slice_be, from_slice_le, to_vec_be, to_vec_le};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TestCompound {

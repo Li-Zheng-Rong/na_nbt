@@ -1,8 +1,7 @@
 use bytes::Bytes;
 use na_nbt::{
-    BigEndian, CompoundOwn, CompoundRef, ListBase, ListOwn, ListRef, LittleEndian, ValueOwn,
-    ValueRef, VisitRef, Writable, from_slice_be, from_slice_le, read_borrowed, read_owned,
-    read_shared,
+    AsValueRef, BigEndian, CompoundOwn, ListOwn, LittleEndian, ValueOwn, ValueRef, Writable,
+    from_slice_be, from_slice_le, read_borrowed, read_owned, read_shared,
 };
 use na_nbt::{to_vec_be, to_vec_le};
 use serde::{Deserialize, Serialize};
@@ -70,6 +69,7 @@ fn test_serialize() {
     };
 
     let vec_be = to_vec_be(&value).unwrap();
+    assert_eq!(from_slice_be::<TestCompound>(&vec_be).unwrap(), value);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,21 +101,21 @@ struct WithEnum {
 }
 
 /// Pretty-print any NBT value recursively
-fn dump<'doc>(value: &impl ValueRef<'doc>) -> String {
+fn dump<'doc>(value: impl AsValueRef<'doc>) -> String {
     dump_inner(value, 0)
 }
 
-fn dump_inner<'doc>(value: &impl ValueRef<'doc>, indent: usize) -> String {
+fn dump_inner<'doc>(value: impl AsValueRef<'doc>, indent: usize) -> String {
     let pad = "  ".repeat(indent);
-    value.visit(|v| match v {
-        VisitRef::End(_) => format!("{pad}End"),
-        VisitRef::Byte(v) => format!("{pad}Byte({v})"),
-        VisitRef::Short(v) => format!("{pad}Short({v})"),
-        VisitRef::Int(v) => format!("{pad}Int({v})"),
-        VisitRef::Long(v) => format!("{pad}Long({v})"),
-        VisitRef::Float(v) => format!("{pad}Float({v})"),
-        VisitRef::Double(v) => format!("{pad}Double({v})"),
-        VisitRef::ByteArray(v) => {
+    match value.as_value_ref() {
+        ValueRef::End => format!("{pad}End"),
+        ValueRef::Byte(v) => format!("{pad}Byte({v})"),
+        ValueRef::Short(v) => format!("{pad}Short({v})"),
+        ValueRef::Int(v) => format!("{pad}Int({v})"),
+        ValueRef::Long(v) => format!("{pad}Long({v})"),
+        ValueRef::Float(v) => format!("{pad}Float({v})"),
+        ValueRef::Double(v) => format!("{pad}Double({v})"),
+        ValueRef::ByteArray(v) => {
             let elems = v
                 .iter()
                 .map(|b| b.to_string())
@@ -123,8 +123,8 @@ fn dump_inner<'doc>(value: &impl ValueRef<'doc>, indent: usize) -> String {
                 .join(", ");
             format!("{pad}ByteArray[{}] {{ {} }}", v.len(), elems)
         }
-        VisitRef::String(v) => format!("{pad}String({:?})", v.decode()),
-        VisitRef::IntArray(v) => {
+        ValueRef::String(v) => format!("{pad}String({:?})", v.decode()),
+        ValueRef::IntArray(v) => {
             let elems = v
                 .iter()
                 .map(|b| b.to_string())
@@ -132,7 +132,7 @@ fn dump_inner<'doc>(value: &impl ValueRef<'doc>, indent: usize) -> String {
                 .join(", ");
             format!("{pad}IntArray[{}] {{ {} }}", v.len(), elems)
         }
-        VisitRef::LongArray(v) => {
+        ValueRef::LongArray(v) => {
             let elems = v
                 .iter()
                 .map(|b| b.to_string())
@@ -140,19 +140,19 @@ fn dump_inner<'doc>(value: &impl ValueRef<'doc>, indent: usize) -> String {
                 .join(", ");
             format!("{pad}LongArray[{}] {{ {} }}", v.len(), elems)
         }
-        VisitRef::List(list) => {
+        ValueRef::List(list) => {
             let mut out = format!("{pad}List[{}] {{\n", list.len());
             for item in list.iter() {
-                out.push_str(&dump_inner(&item, indent + 1));
+                out.push_str(&dump_inner(item, indent + 1));
                 out.push('\n');
             }
             out.push_str(&format!("{pad}}}"));
             out
         }
-        VisitRef::Compound(compound) => {
+        ValueRef::Compound(compound) => {
             let mut out = format!("{pad}Compound {{\n");
             for (key, val) in compound.iter() {
-                let nested = dump_inner(&val, indent + 1);
+                let nested = dump_inner(val, indent + 1);
                 out.push_str(&format!(
                     "{}  {:?}: {}\n",
                     pad,
@@ -163,7 +163,7 @@ fn dump_inner<'doc>(value: &impl ValueRef<'doc>, indent: usize) -> String {
             out.push_str(&format!("{pad}}}"));
             out
         }
-    })
+    }
 }
 
 fn test_serde(data: &[u8]) {
@@ -258,7 +258,8 @@ fn test_serde(data: &[u8]) {
     }
 }
 
-fn test_round<'doc>(value: &impl ValueRef<'doc>) {
+fn test_round<'doc>(value: impl AsValueRef<'doc>) {
+    let value = value.as_value_ref();
     let a = dump(value);
     let vec_little = value.write_to_vec::<LittleEndian>();
     let vec_big = value.write_to_vec::<BigEndian>();
@@ -276,25 +277,25 @@ fn test_round<'doc>(value: &impl ValueRef<'doc>) {
         let vec = vec_big;
         {
             let rev = read_borrowed::<BigEndian>(&vec).unwrap();
-            let b = dump(&rev.root());
+            let b = dump(&rev);
             assert_eq!(a, b);
-            assert_eq!(vec, rev.root().write_to_vec::<BigEndian>());
+            assert_eq!(vec, rev.write_to_vec::<BigEndian>());
         }
         {
             let mut rev = read_owned::<BigEndian, BigEndian>(&vec).unwrap();
-            let b = dump(&rev.to_ref());
+            let b = dump(&rev);
             assert_eq!(a, b);
             assert_eq!(vec, rev.write_to_vec::<BigEndian>());
-            assert_eq!(vec, rev.to_mut().write_to_vec::<BigEndian>());
-            assert_eq!(vec, rev.to_ref().write_to_vec::<BigEndian>());
+            assert_eq!(vec, rev.as_mut().write_to_vec::<BigEndian>());
+            assert_eq!(vec, rev.as_ref().write_to_vec::<BigEndian>());
         }
         {
             let mut rev = read_owned::<BigEndian, LittleEndian>(&vec).unwrap();
-            let b = dump(&rev.to_ref());
+            let b = dump(&rev);
             assert_eq!(a, b);
             assert_eq!(vec, rev.write_to_vec::<BigEndian>());
-            assert_eq!(vec, rev.to_mut().write_to_vec::<BigEndian>());
-            assert_eq!(vec, rev.to_ref().write_to_vec::<BigEndian>());
+            assert_eq!(vec, rev.as_mut().write_to_vec::<BigEndian>());
+            assert_eq!(vec, rev.as_ref().write_to_vec::<BigEndian>());
         }
         {
             let bytes = Bytes::from(vec);
@@ -307,25 +308,25 @@ fn test_round<'doc>(value: &impl ValueRef<'doc>) {
         let vec = vec_little;
         {
             let rev = read_borrowed::<LittleEndian>(&vec).unwrap();
-            let b = dump(&rev.root());
+            let b = dump(&rev);
             assert_eq!(a, b);
-            assert_eq!(vec, rev.root().write_to_vec::<LittleEndian>());
+            assert_eq!(vec, rev.write_to_vec::<LittleEndian>());
         }
         {
             let mut rev = read_owned::<LittleEndian, BigEndian>(&vec).unwrap();
-            let b = dump(&rev.to_ref());
+            let b = dump(&rev);
             assert_eq!(a, b);
             assert_eq!(vec, rev.write_to_vec::<LittleEndian>());
-            assert_eq!(vec, rev.to_mut().write_to_vec::<LittleEndian>());
-            assert_eq!(vec, rev.to_ref().write_to_vec::<LittleEndian>());
+            assert_eq!(vec, rev.as_mut().write_to_vec::<LittleEndian>());
+            assert_eq!(vec, rev.as_ref().write_to_vec::<LittleEndian>());
         }
         {
             let mut rev = read_owned::<LittleEndian, LittleEndian>(&vec).unwrap();
-            let b = dump(&rev.to_ref());
+            let b = dump(&rev);
             assert_eq!(a, b);
             assert_eq!(vec, rev.write_to_vec::<LittleEndian>());
-            assert_eq!(vec, rev.to_mut().write_to_vec::<LittleEndian>());
-            assert_eq!(vec, rev.to_ref().write_to_vec::<LittleEndian>());
+            assert_eq!(vec, rev.as_mut().write_to_vec::<LittleEndian>());
+            assert_eq!(vec, rev.as_ref().write_to_vec::<LittleEndian>());
         }
         {
             let bytes = Bytes::from(vec);
@@ -338,38 +339,38 @@ fn test_round<'doc>(value: &impl ValueRef<'doc>) {
 
 fn test_direct(data: &[u8]) {
     if let Ok(doc) = read_borrowed::<BigEndian>(data) {
-        test_round(&doc.root());
-        let a = dump(&doc.root());
+        test_round(&doc);
+        let a = dump(&doc);
         let bytes = Bytes::copy_from_slice(data);
         let doc = read_shared::<BigEndian>(bytes.clone()).unwrap();
         let b = dump(&doc);
         assert_eq!(a, b);
         let doc = read_owned::<BigEndian, BigEndian>(&bytes).unwrap();
-        let b = dump(&doc.to_ref());
+        let b = dump(&doc);
         assert_eq!(a, b);
         let doc = read_owned::<BigEndian, LittleEndian>(&bytes).unwrap();
-        let b = dump(&doc.to_ref());
+        let b = dump(&doc);
         assert_eq!(a, b);
     }
     if let Ok(doc) = read_borrowed::<LittleEndian>(data) {
-        test_round(&doc.root());
-        let a = dump(&doc.root());
+        test_round(&doc);
+        let a = dump(&doc);
         let bytes = Bytes::copy_from_slice(data);
         let doc = read_shared::<LittleEndian>(bytes.clone()).unwrap();
         let b = dump(&doc);
         assert_eq!(a, b);
         let doc = read_owned::<LittleEndian, BigEndian>(&bytes).unwrap();
-        let b = dump(&doc.to_ref());
+        let b = dump(&doc);
         assert_eq!(a, b);
         let doc = read_owned::<LittleEndian, LittleEndian>(&bytes).unwrap();
-        let b = dump(&doc.to_ref());
+        let b = dump(&doc);
         assert_eq!(a, b);
     }
 }
 
 #[test]
 fn test_read_write() {
-    let dir = r".\fuzz\in";
+    let dir = "fuzz/in";
     let mut count = 0;
     for entry in fs::read_dir(dir).unwrap() {
         let entry = entry.unwrap();
@@ -556,7 +557,7 @@ fn test_complex_nbt_round_trip() {
     }
     root.insert("nested_list", nested_list);
 
-    // Convert to OwnValue for writing
+    // Convert to ValueOwn for writing
     let value = ValueOwn::<BigEndian>::Compound(root);
-    test_round(&value.to_ref());
+    test_round(&value);
 }

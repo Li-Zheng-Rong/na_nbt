@@ -1,11 +1,10 @@
 use std::{
     borrow::{Borrow, Cow},
-    mem,
+    fmt, mem,
+    ops::Deref,
 };
 
 use simd_cesu8::DecodingError;
-
-use crate::StringOwn;
 
 #[inline(always)]
 #[cold]
@@ -163,13 +162,25 @@ pub(crate) const fn same_byte_order<A: ByteOrder, B: ByteOrder>() -> bool {
 
 pub(crate) static EMPTY_LIST: [u8; 5] = [0; 5];
 pub(crate) static EMPTY_COMPOUND: [u8; 1] = [0];
+pub(crate) static EMPTY_TYPED_LISTS: [[u8; 5]; 13] = [
+    [0, 0, 0, 0, 0],
+    [1, 0, 0, 0, 0],
+    [2, 0, 0, 0, 0],
+    [3, 0, 0, 0, 0],
+    [4, 0, 0, 0, 0],
+    [5, 0, 0, 0, 0],
+    [6, 0, 0, 0, 0],
+    [7, 0, 0, 0, 0],
+    [8, 0, 0, 0, 0],
+    [9, 0, 0, 0, 0],
+    [10, 0, 0, 0, 0],
+    [11, 0, 0, 0, 0],
+    [12, 0, 0, 0, 0],
+];
 
 /// A MUTF-8 (Modified UTF-8) encoded string slice.
-///
-/// MUTF-8 is an encoding used by Java.
-///
-/// This type is used for NBT string values and keys, which are encoded in MUTF-8.
 #[repr(transparent)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MUTF8Str([u8]);
 
 impl Default for &MUTF8Str {
@@ -179,17 +190,24 @@ impl Default for &MUTF8Str {
     }
 }
 
-impl Borrow<MUTF8Str> for StringOwn {
-    fn borrow(&self) -> &MUTF8Str {
-        self.as_mutf8_str()
+impl fmt::Debug for MUTF8Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode_lossy(), f)
+    }
+}
+
+impl fmt::Display for MUTF8Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.decode_lossy(), f)
     }
 }
 
 impl ToOwned for MUTF8Str {
-    type Owned = StringOwn;
+    type Owned = MUTF8String;
 
+    #[inline]
     fn to_owned(&self) -> Self::Owned {
-        StringOwn::from(self)
+        MUTF8String::from(self)
     }
 }
 
@@ -200,16 +218,11 @@ impl MUTF8Str {
     ///
     /// The caller must ensure that `bytes` contains valid MUTF-8 encoded data.
     ///
-    /// MUTF-8 (Modified UTF-8) is an encoding used by Java.
-    ///
-    /// # Example
-    ///
     /// ```
     /// use na_nbt::MUTF8Str;
     ///
-    /// // Valid MUTF-8: standard ASCII
-    /// let valid = b"hello";
-    /// let s = unsafe { MUTF8Str::from_mutf8_unchecked(valid) };
+    /// let s = unsafe { MUTF8Str::from_mutf8_unchecked(b"hello") };
+    /// assert_eq!(s.as_bytes(), b"hello");
     /// ```
     #[inline]
     pub const unsafe fn from_mutf8_unchecked(bytes: &[u8]) -> &Self {
@@ -221,17 +234,26 @@ impl MUTF8Str {
         &self.0
     }
 
-    /// see [`simd_cesu8::mutf8::decode_lossy`]
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// See [`simd_cesu8::mutf8::decode_lossy`].
     #[inline]
     pub fn decode_lossy(&self) -> Cow<'_, str> {
         decode_mutf8_lossy(&self.0)
     }
 
-    /// see [`simd_cesu8::mutf8::decode_strict`]
+    /// See [`simd_cesu8::mutf8::decode_strict`].
     #[inline]
     pub fn decode_strict(&self) -> Result<Cow<'_, str>, DecodingError> {
         if self.0.len() < 64 && is_strict_mutf8_ascii_under_64(&self.0) {
-            // SAFETY: Non-null ASCII bytes (0x01..=0x7F) are valid strict MUTF-8 and UTF-8.
             Ok(Cow::Borrowed(unsafe {
                 std::str::from_utf8_unchecked(&self.0)
             }))
@@ -240,7 +262,7 @@ impl MUTF8Str {
         }
     }
 
-    /// see [`simd_cesu8::mutf8::decode`]
+    /// See [`simd_cesu8::mutf8::decode`].
     #[inline]
     pub fn decode(&self) -> Result<Cow<'_, str>, DecodingError> {
         if self.0.len() < 64
@@ -250,7 +272,6 @@ impl MUTF8Str {
                 self.0[0] < 0x80 && self.0.is_ascii()
             })
         {
-            // SAFETY: ASCII bytes (0x00..=0x7F) are always valid UTF-8.
             Ok(Cow::Borrowed(unsafe {
                 std::str::from_utf8_unchecked(&self.0)
             }))
@@ -259,23 +280,21 @@ impl MUTF8Str {
         }
     }
 
-    /// see [`simd_cesu8::mutf8::decode_lossy_strict`]
+    /// See [`simd_cesu8::mutf8::decode_lossy_strict`].
     #[inline]
     pub fn decode_lossy_strict(&self) -> Cow<'_, str> {
         if self.0.len() < 64 && is_strict_mutf8_ascii_under_64(&self.0) {
-            // SAFETY: Non-null ASCII bytes (0x01..=0x7F) are valid strict MUTF-8 and UTF-8.
             Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(&self.0) })
         } else {
             simd_cesu8::mutf8::decode_lossy_strict(&self.0)
         }
     }
 
-    /// Calls [`Self::decode_lossy`] and converts the result to a [`String`].
+    /// Decodes lossily into an owned [`String`].
     #[inline]
     pub fn to_utf8_string(&self) -> String {
         if self.0.len() < 64 {
             if is_valid_utf8_under_64(&self.0) {
-                // SAFETY: Validated as ASCII or UTF-8 above.
                 unsafe { String::from_utf8_unchecked(self.0.to_vec()) }
             } else {
                 decode_mutf8_lossy_owned_slow(&self.0)
@@ -286,15 +305,158 @@ impl MUTF8Str {
     }
 }
 
+/// An owned, growable MUTF-8 encoded string.
+#[repr(transparent)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MUTF8String(pub(crate) Vec<u8>);
+
+impl MUTF8String {
+    #[inline]
+    pub const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    /// Creates an owned `MUTF8String` from raw MUTF-8 bytes without validation.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must contain valid MUTF-8 encoded data.
+    #[inline]
+    pub const unsafe fn from_mutf8_unchecked(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_raw_slice(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+
+    #[inline]
+    pub fn as_mutf8_str(&self) -> &MUTF8Str {
+        unsafe { MUTF8Str::from_mutf8_unchecked(&self.0) }
+    }
+
+    #[inline]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
+    #[inline]
+    pub fn push(&mut self, ch: char) {
+        let mut buf = [0u8; 4];
+        self.push_str(ch.encode_utf8(&mut buf));
+    }
+
+    #[inline]
+    pub fn push_str(&mut self, s: &str) {
+        self.0.extend_from_slice(&encode_mutf8(s));
+    }
+
+    #[inline]
+    pub fn push_mutf8(&mut self, s: &MUTF8Str) {
+        self.0.extend_from_slice(s.as_bytes());
+    }
+}
+
+impl Deref for MUTF8String {
+    type Target = MUTF8Str;
+
+    #[inline]
+    fn deref(&self) -> &MUTF8Str {
+        self.as_mutf8_str()
+    }
+}
+
+impl Borrow<MUTF8Str> for MUTF8String {
+    #[inline]
+    fn borrow(&self) -> &MUTF8Str {
+        self.as_mutf8_str()
+    }
+}
+
+impl AsRef<MUTF8Str> for MUTF8String {
+    #[inline]
+    fn as_ref(&self) -> &MUTF8Str {
+        self.as_mutf8_str()
+    }
+}
+
+impl AsRef<[u8]> for MUTF8String {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MUTF8String {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_mutf8_str(), f)
+    }
+}
+
+impl fmt::Display for MUTF8String {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_mutf8_str(), f)
+    }
+}
+
+impl From<&MUTF8Str> for MUTF8String {
+    #[inline]
+    fn from(s: &MUTF8Str) -> Self {
+        Self(s.as_bytes().to_vec())
+    }
+}
+
+impl From<&str> for MUTF8String {
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self(encode_mutf8(s).into_owned())
+    }
+}
+
+impl From<String> for MUTF8String {
+    #[inline]
+    fn from(s: String) -> Self {
+        let bytes = s.as_bytes();
+        if (bytes.len() <= 16 && is_non_null_ascii_short_16(bytes))
+            || !simd_cesu8::mutf8::needs_encoded(&s)
+        {
+            Self(s.into_bytes())
+        } else {
+            Self(encode_mutf8_slow(&s).into_owned())
+        }
+    }
+}
+
+impl From<Cow<'_, str>> for MUTF8String {
+    #[inline]
+    fn from(s: Cow<'_, str>) -> Self {
+        match s {
+            Cow::Borrowed(b) => Self::from(b),
+            Cow::Owned(o) => Self::from(o),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
-    use super::{MUTF8Str, decode_mutf8_lossy, encode_mutf8};
-    use crate::{
-        BigEndian, CompoundMut, CompoundOwn, CompoundRef, StringOwn, ValueMut, ValueRef, Writable,
-        read_borrowed, read_owned, tag,
-    };
+    use super::*;
+    use crate::{BigEndian, CompoundOwn, Writable, read_borrowed, read_owned, tag};
 
     fn assert_decode_parity(bytes: &[u8]) {
         let m = unsafe { MUTF8Str::from_mutf8_unchecked(bytes) };
@@ -307,7 +469,6 @@ mod tests {
             matches!(exp_lossy, Cow::Borrowed(_)),
             "decode_lossy Cow variant mismatch for {bytes:?}"
         );
-        assert_eq!(decode_mutf8_lossy(bytes), exp_lossy);
         assert_eq!(m.to_utf8_string(), exp_lossy.as_ref());
 
         let got_decode = m.decode();
@@ -382,11 +543,9 @@ mod tests {
                 assert_decode_parity(&with_bad);
             }
         }
-        assert_decode_parity(&vec![b'z'; 180]);
+        assert_decode_parity(&[b'z'; 180]);
         assert_decode_parity("§6Aspect of the End §7[+100]".as_bytes());
 
-        // Raw 0x00 at every SWAR boundary position: valid in non-strict decode/decode_lossy,
-        // invalid in decode_strict / decode_lossy_strict!
         for pos in 0..=18 {
             let mut buf = vec![b'x'; 19];
             buf[pos] = 0x00;
@@ -403,7 +562,6 @@ mod tests {
             assert_decode_parity(&buf);
         }
 
-        // Valid MUTF-8 null (0xC0 0x80), 2-byte, 3-byte BMP (\u{FFFF}), 6-byte surrogate, and raw 4-byte UTF-8
         assert_decode_parity(b"a\xC0\x80b");
         assert_decode_parity("é".as_bytes());
         assert_decode_parity("中文测试字符串".as_bytes());
@@ -443,34 +601,44 @@ mod tests {
     }
 
     #[test]
-    fn test_non_serde_string_own_zero_copy_and_compound_mutf8() {
-        // StringOwn::from(String) reuses heap buffer when no MUTF-8 re-encoding is needed
+    fn test_mutf8_string_zero_copy_and_compound_roundtrip() {
         let s = String::from("allocated_ascii_and_中文_\u{FFFF}");
         let orig_ptr = s.as_ptr();
-        let own = StringOwn::from(s);
-        assert_eq!(own.as_ptr(), orig_ptr);
-        assert_eq!(&*own.decode_strict().unwrap(), "allocated_ascii_and_中文_\u{FFFF}");
+        let own = MUTF8String::from(s);
+        assert_eq!(own.as_bytes().as_ptr(), orig_ptr);
+        assert_eq!(
+            &*own.decode_strict().unwrap(),
+            "allocated_ascii_and_中文_\u{FFFF}"
+        );
 
-        // StringOwn::from(String) re-encodes when '\0' or 4-byte UTF-8 is present
-        let mut s_mutf8 = StringOwn::from(String::from("null\0emoji🎉"));
-        assert_eq!(s_mutf8.as_bytes(), &*simd_cesu8::mutf8::encode("null\0emoji🎉"));
+        let mut s_mutf8 = MUTF8String::from(String::from("null\0emoji🎉"));
+        assert_eq!(
+            s_mutf8.as_bytes(),
+            &*simd_cesu8::mutf8::encode("null\0emoji🎉")
+        );
         assert_eq!(&*s_mutf8.decode_strict().unwrap(), "null\0emoji🎉");
         s_mutf8.push_str("_tail\0🚀");
-        assert_eq!(&*s_mutf8.decode_strict().unwrap(), "null\0emoji🎉_tail\0🚀");
+        assert_eq!(
+            &*s_mutf8.decode_strict().unwrap(),
+            "null\0emoji🎉_tail\0🚀"
+        );
 
-        // CompoundOwn + read_borrowed + read_owned round-trip with ASCII, CJK, null, and emoji keys/values
-        let mut root = CompoundOwn::<BigEndian>::default();
+        let mut root = CompoundOwn::<BigEndian>::new();
         root.insert("ascii_key", "ascii_val");
         root.insert("key\0with\0null", "val\0with\0null");
         root.insert("emoji🎉key_long_enough_for_16b", String::from("emoji🎉val"));
 
         assert_eq!(
-            &*root.get_::<tag::String>("ascii_key").unwrap().decode_strict().unwrap(),
+            &*root
+                .get_as::<tag::String>("ascii_key")
+                .unwrap()
+                .decode_strict()
+                .unwrap(),
             "ascii_val"
         );
         assert_eq!(
             &*root
-                .get_::<tag::String>("key\0with\0null")
+                .get_as::<tag::String>("key\0with\0null")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -478,7 +646,7 @@ mod tests {
         );
         assert_eq!(
             &*root
-                .get_::<tag::String>("emoji🎉key_long_enough_for_16b")
+                .get_as::<tag::String>("emoji🎉key_long_enough_for_16b")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -488,11 +656,11 @@ mod tests {
         let bytes = root.write_to_vec::<BigEndian>();
         let doc = read_borrowed::<BigEndian>(&bytes).unwrap();
         let doc_root = doc.root();
-        let doc_compound = doc_root.ref_::<tag::Compound>().unwrap();
+        let doc_compound = doc_root.as_::<tag::Compound>().unwrap();
         assert!(doc_compound.get("ascii_key").is_some());
         assert_eq!(
             &*doc_root
-                .get_::<tag::String>("key\0with\0null")
+                .get_as::<tag::String>("key\0with\0null")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -500,21 +668,21 @@ mod tests {
         );
         assert_eq!(
             &*doc_root
-                .get_::<tag::String>("emoji🎉key_long_enough_for_16b")
+                .get_as::<tag::String>("emoji🎉key_long_enough_for_16b")
                 .unwrap()
                 .decode_lossy(),
             "emoji🎉val"
         );
 
         let mut owned_doc = read_owned::<BigEndian, BigEndian>(&bytes).unwrap();
-        let mut owned_root = owned_doc.to_mut().into_::<tag::Compound>().unwrap();
-        if let Some(mut s_mut) = owned_root.get_mut_::<tag::String>("key\0with\0null") {
+        let mut owned_root = owned_doc.as_mut_::<tag::Compound>().unwrap();
+        if let Some(mut s_mut) = owned_root.get_mut_as::<tag::String>("key\0with\0null") {
             assert_eq!(&*s_mut.decode_strict().unwrap(), "val\0with\0null");
             s_mut.push_str("!");
         }
         assert_eq!(
             &*owned_root
-                .get_::<tag::String>("key\0with\0null")
+                .get_as::<tag::String>("key\0with\0null")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),

@@ -1,20 +1,27 @@
-use std::fs::File;
-
 use na_nbt::{
-    BE, CompoundMut, CompoundOwn, CompoundRef, ListBase, ListRef, TypedListOwn, ValueRef, VisitRef,
-    read_borrowed,
+    AsValueRef, BE, ByteOrder, CompoundOwn, TypedListOwn, ValueRef, read_borrowed, tag,
 };
+use serde::{Deserialize, Serialize};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = include_bytes!("../fuzz/in/level");
     let nbt = read_borrowed::<BE>(data)?;
-    let str = dump(&nbt.root(), 0);
-    println!("{}", str);
-    let _ = an_address();
+    let str = dump(&nbt, 0);
+    println!("{str}");
+
+    let mut owned = CompoundOwn::<BE>::new();
+    populate_example(&mut owned);
+    // The exact same function also mutates nested `Mut<'_, CompoundOwn<BE>>` guards via DerefMut:
+    if let Some(mut sub) = owned.get_mut_as::<tag::Compound>("Compound") {
+        populate_example(&mut sub);
+    }
+    println!("{}", dump(&na_nbt::ValueOwn::Compound(owned), 0));
+
+    an_address()?;
     Ok(())
 }
 
-fn example<'s>(nbt: &mut impl CompoundMut<'s>) {
+fn populate_example<O: ByteOrder>(nbt: &mut CompoundOwn<O>) {
     let mut comp = CompoundOwn::default();
     comp.insert("Int", 1);
     comp.insert("String", "2");
@@ -27,33 +34,33 @@ fn example<'s>(nbt: &mut impl CompoundMut<'s>) {
     nbt.insert("List", list);
 }
 
-fn dump<'s>(value: &impl ValueRef<'s>, indent: usize) -> String {
+fn dump<'s>(value: impl AsValueRef<'s>, indent: usize) -> String {
     let pad = "  ".repeat(indent);
-    value.visit(|v| match v {
-        VisitRef::End(_) => format!("{pad}End"),
-        VisitRef::Byte(v) => format!("{pad}Byte({v})"),
-        VisitRef::Short(v) => format!("{pad}Short({v})"),
-        VisitRef::Int(v) => format!("{pad}Int({v})"),
-        VisitRef::Long(v) => format!("{pad}Long({v})"),
-        VisitRef::Float(v) => format!("{pad}Float({v})"),
-        VisitRef::Double(v) => format!("{pad}Double({v})"),
-        VisitRef::ByteArray(v) => format!("{pad}ByteArray({} bytes)", v.len()),
-        VisitRef::String(v) => format!("{pad}String({:?})", v.decode_lossy()),
-        VisitRef::IntArray(v) => format!("{pad}IntArray({} ints)", v.len()),
-        VisitRef::LongArray(v) => format!("{pad}LongArray({} longs)", v.len()),
-        VisitRef::List(list) => {
+    match value.as_value_ref() {
+        ValueRef::End => format!("{pad}End"),
+        ValueRef::Byte(v) => format!("{pad}Byte({v})"),
+        ValueRef::Short(v) => format!("{pad}Short({v})"),
+        ValueRef::Int(v) => format!("{pad}Int({v})"),
+        ValueRef::Long(v) => format!("{pad}Long({v})"),
+        ValueRef::Float(v) => format!("{pad}Float({v})"),
+        ValueRef::Double(v) => format!("{pad}Double({v})"),
+        ValueRef::ByteArray(v) => format!("{pad}ByteArray({} bytes)", v.len()),
+        ValueRef::String(v) => format!("{pad}String({:?})", v.decode_lossy()),
+        ValueRef::IntArray(v) => format!("{pad}IntArray({} ints)", v.len()),
+        ValueRef::LongArray(v) => format!("{pad}LongArray({} longs)", v.len()),
+        ValueRef::List(list) => {
             let mut out = format!("{pad}List[{}] {{\n", list.len());
             for item in list.iter() {
-                out.push_str(&dump(&item, indent + 1));
+                out.push_str(&dump(item, indent + 1));
                 out.push('\n');
             }
             out.push_str(&format!("{pad}}}"));
             out
         }
-        VisitRef::Compound(compound) => {
+        ValueRef::Compound(compound) => {
             let mut out = format!("{pad}Compound {{\n");
             for (key, val) in compound.iter() {
-                let nested = dump(&val, indent + 1);
+                let nested = dump(val, indent + 1);
                 out.push_str(&format!(
                     "{}  {:?}: {}\n",
                     pad,
@@ -64,10 +71,8 @@ fn dump<'s>(value: &impl ValueRef<'s>, indent: usize) -> String {
             out.push_str(&format!("{pad}}}"));
             out
         }
-    })
+    }
 }
-
-use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Address {

@@ -1,79 +1,79 @@
 //! # na_nbt
 //!
-//! A high-performance NBT (Named Binary Tag) parser with serde support.
-//! NBT is a binary format used by Minecraft.
+//! A high-performance NBT (Named Binary Tag) parser, DOM, and Serde library.
 //!
-//! # Operating on untyped NBT values
+//! # Operating on NBT values
 //!
-//! There are three ways to parse NBT values:
-//! 1. **Borrowed**: [`read_borrowed`] - Zero-copy reading from a borrowed slice.
+//! `na_nbt` provides three parsing modes:
+//!
+//! 1. **Borrowed** ([`read_borrowed`]) — Zero-copy reading from `&[u8]`:
 //! ```rust
-//! use na_nbt::{BE, ValueRef, read_borrowed, tag};
+//! use na_nbt::{BE, read_borrowed, tag};
+//!
 //! let data = include_bytes!("../fuzz/in/level");
 //! let doc = read_borrowed::<BE>(data).unwrap();
-//! let nbt = doc.root();
-//! let o = nbt
+//! let op = doc
 //!     .get("Data")
 //!     .and_then(|d| d.get("Player"))
 //!     .and_then(|p| p.get("Attributes"))
 //!     .and_then(|a| a.get(2))
 //!     .and_then(|a| a.get("Modifiers"))
 //!     .and_then(|m| m.get(0))
-//!     .and_then(|m| m.get_::<tag::Int>("Operation"))
-//!     // or:
-//!     //  .and_then(|m| m.get("Operation"))
-//!     //  .and_then(|o| o.into_::<tag::Int>())
+//!     .and_then(|m| m.get_as::<tag::Int>("Operation"))
 //!     .unwrap();
-//! assert_eq!(o, 2);
+//! assert_eq!(op, 2);
 //! ```
-//! There is a constraint that `doc` must not outlive the source, and `nbt` must not outlive `doc`.
 //!
-//! 2. **Shared**: [`read_shared`] - Zero-copy reading from a [`bytes::Bytes`] with shared ownership.
+//! 2. **Shared** (`read_shared` / [`read_document`]) — Zero-copy reading backed by `bytes::Bytes`
+//!    or any `AsRef<[u8]>` buffer:
 //! ```rust
-//! use na_nbt::{BE, ValueRef, read_shared, tag};
+//! # #[cfg(feature = "shared")]
+//! # {
+//! use na_nbt::{BE, read_shared, tag};
+//!
 //! let data = include_bytes!("../fuzz/in/level");
-//! let nbt = read_shared::<BE>(bytes::Bytes::copy_from_slice(data)).unwrap();
-//! let player = nbt
+//! let doc = read_shared::<BE>(bytes::Bytes::copy_from_slice(data)).unwrap();
+//! let player = doc
 //!     .get("Data")
-//!     .and_then(|d| d.get_::<tag::Compound>("Player"))
+//!     .and_then(|d| d.get_as::<tag::Compound>("Player"))
 //!     .unwrap();
+//! assert!(player.contains_key("Health"));
+//! # }
 //! ```
-//! Similar to borrowed, but there is not a `doc`, and `nbt`'s lifetime is not tied to the source.
 //!
-//! 3. **Owned**: [`read_owned`] - Parses NBT into fully owned structures that can be modified.
+//! 3. **Owned** ([`read_owned`]) — Flat-buffer owned DOM supporting in-place mutation and fast serialization:
 //! ```rust
-//! use na_nbt::{BE, ValueMut, Writable, read_owned, tag};
+//! use na_nbt::{BE, Writable, read_owned, tag};
+//!
 //! let data = include_bytes!("../fuzz/in/level");
 //! let mut nbt = read_owned::<BE, BE>(data).unwrap();
-//! let mut data = nbt.get_mut("Data").unwrap();
-//! let mut player = data.get_mut("Player").unwrap();
-//! player.get_mut("Health").unwrap().into_::<tag::Short>().unwrap().set(10);
-//! player.get_mut_::<tag::Short>("Health").unwrap().set(10);
-//! *player.get_mut_::<tag::Byte>("Sleeping").unwrap() = 1;
-//! let file = std::fs::File::create("new.nbt").unwrap();
-//! nbt.write_to_writer::<BE>(file).unwrap();
+//! {
+//!     let mut data_tag = nbt.get_mut("Data").unwrap();
+//!     let mut player = data_tag.get_mut("Player").unwrap();
+//!     *player.get_mut_as::<tag::Short>("Health").unwrap() = 10;
+//!     *player.get_mut_as::<tag::Byte>("Sleeping").unwrap() = 1;
+//! }
+//!
+//! let mut out = Vec::new();
+//! nbt.write_to_writer::<BE>(&mut out).unwrap();
+//! assert!(!out.is_empty());
 //! ```
 //!
-//! # Generic functions and constructing NBT values
+//! # Generic Read & Mutation Across Borrowed, Mut, and Owned
 //!
-//! There are three groups of traits and structs provided to write generic functions and construct NBT values.
-//!
-//! in fact, methods on the result of `read_xxx` are provided by these traits.
-//!
-//! 1. Ref: [`ValueRef`], [`ListRef`], [`CompoundRef`] and [`TypedListRef`].
-//! 2. Mut: [`ValueMut`], [`ListMut`], [`CompoundMut`] and [`TypedListMut`].
-//! 3. Own: [`ValueOwn`], [`ListOwn`], [`CompoundOwn`] and [`TypedListOwn`].
-//!
+//! - Container mutations take `&mut CompoundOwn<O>`, `&mut ListOwn<O>`, or `&mut TypedListOwn<O, T>`
+//!   directly — [`Mut`] guards dereference to `&mut T` automatically:
 //! ```rust
-//! use na_nbt::{CompoundMut, CompoundOwn, TypedListOwn};
-//! 
-//! fn example<'s>(nbt: &mut impl CompoundMut<'s>) {
-//!     let mut comp = CompoundOwn::default();
+//! use na_nbt::{ByteOrder, CompoundOwn, TypedListOwn, tag};
+//!
+//! fn populate<O: ByteOrder>(nbt: &mut CompoundOwn<O>) {
+//!     let mut comp = CompoundOwn::new();
 //!     comp.insert("Int", 1);
-//!     comp.insert("String", "2");
+//!     comp.insert("String", "hello");
 //!     comp.insert("ByteArray", [1i8, 2, 3]);
 //!     nbt.insert("Compound", comp);
-//!     let mut list = TypedListOwn::default();
+//!
+//!     let mut list = TypedListOwn::<O, tag::Int>::new();
 //!     list.push(1);
 //!     list.push(2);
 //!     list.push(3);
@@ -81,54 +81,52 @@
 //! }
 //! ```
 //!
+//! - Read-only functions match directly on [`ValueRef`] (accepting [`Document`], [`ValueRef`],
+//!   [`&ValueOwn`](ValueOwn), and [`&ValueMut`](ValueMut) via [`AsValueRef`]):
 //! ```rust
-//! use na_nbt::{ValueRef, VisitRef, ListBase, ValueBase, CompoundRef, ListRef};
+//! use na_nbt::{AsValueRef, ValueRef};
 //!
-//! fn dump<'s>(value: &impl ValueRef<'s>, indent: usize) -> String {
+//! fn dump<'a>(v: impl AsValueRef<'a>, indent: usize) -> String {
 //!     let pad = "  ".repeat(indent);
-//!     value.visit(|v| match v {
-//!         VisitRef::End(_) => format!("{pad}End"),
-//!         VisitRef::Byte(v) => format!("{pad}Byte({v})"),
-//!         VisitRef::Short(v) => format!("{pad}Short({v})"),
-//!         VisitRef::Int(v) => format!("{pad}Int({v})"),
-//!         VisitRef::Long(v) => format!("{pad}Long({v})"),
-//!         VisitRef::Float(v) => format!("{pad}Float({v})"),
-//!         VisitRef::Double(v) => format!("{pad}Double({v})"),
-//!         VisitRef::ByteArray(v) => format!("{pad}ByteArray({} bytes)", v.len()),
-//!         VisitRef::String(v) => format!("{pad}String({:?})", v.decode_lossy()),
-//!         VisitRef::IntArray(v) => format!("{pad}IntArray({} ints)", v.len()),
-//!         VisitRef::LongArray(v) => format!("{pad}LongArray({} longs)", v.len()),
-//!         VisitRef::List(list) => {
+//!     match v.as_value_ref() {
+//!         ValueRef::End => format!("{pad}End"),
+//!         ValueRef::Byte(v) => format!("{pad}Byte({v})"),
+//!         ValueRef::Short(v) => format!("{pad}Short({v})"),
+//!         ValueRef::Int(v) => format!("{pad}Int({v})"),
+//!         ValueRef::Long(v) => format!("{pad}Long({v})"),
+//!         ValueRef::Float(v) => format!("{pad}Float({v})"),
+//!         ValueRef::Double(v) => format!("{pad}Double({v})"),
+//!         ValueRef::ByteArray(v) => format!("{pad}ByteArray({} bytes)", v.len()),
+//!         ValueRef::String(v) => format!("{pad}String({:?})", v.decode_lossy()),
+//!         ValueRef::IntArray(v) => format!("{pad}IntArray({} ints)", v.len()),
+//!         ValueRef::LongArray(v) => format!("{pad}LongArray({} longs)", v.len()),
+//!         ValueRef::List(list) => {
 //!             let mut out = format!("{pad}List[{}] {{\n", list.len());
-//!             for item in list.iter() {
-//!                 out.push_str(&dump(&item, indent + 1));
+//!             for item in list {
+//!                 out.push_str(&dump(item, indent + 1));
 //!                 out.push('\n');
 //!             }
 //!             out.push_str(&format!("{pad}}}"));
 //!             out
 //!         }
-//!         VisitRef::Compound(compound) => {
+//!         ValueRef::Compound(compound) => {
 //!             let mut out = format!("{pad}Compound {{\n");
-//!             for (key, val) in compound.iter() {
-//!                 let nested = dump(&val, indent + 1);
-//!                 out.push_str(&format!(
-//!                     "{}  {:?}: {}\n",
-//!                     pad,
-//!                     key.decode_lossy(),
-//!                     nested.trim_start()
-//!                 ));
+//!             for (key, val) in compound {
+//!                 let nested = dump(val, indent + 1);
+//!                 out.push_str(&format!("{pad}  {:?}: {}\n", key.decode_lossy(), nested.trim_start()));
 //!             }
 //!             out.push_str(&format!("{pad}}}"));
 //!             out
 //!         }
-//!     })
+//!     }
 //! }
 //! ```
 //!
 //! # Serde support
 //!
-//! na_nbt provides serde support. For serde-to-NBT type mapping, see [`tag_probe`].
 //! ```rust
+//! # #[cfg(feature = "serde")]
+//! # {
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -137,18 +135,14 @@
 //!     city: String,
 //! }
 //!
-//! fn an_address() -> na_nbt::Result<()> {
-//!     let address = Address {
-//!         street: "10 Downing Street".to_owned(),
-//!         city: "London".to_owned(),
-//!     };
-//!
-//!     let j = na_nbt::to_vec_be(&address)?;
-//!     let addr: Address = na_nbt::from_slice_be(&j)?;
-//!     assert_eq!(addr, address);
-//!
-//!     Ok(())
-//! }
+//! let address = Address {
+//!     street: "10 Downing Street".to_owned(),
+//!     city: "London".to_owned(),
+//! };
+//! let bytes = na_nbt::to_vec_be(&address).unwrap();
+//! let decoded: Address = na_nbt::from_slice_be(&bytes).unwrap();
+//! assert_eq!(decoded, address);
+//! # }
 //! ```
 
 pub use zerocopy::BigEndian;
@@ -157,35 +151,41 @@ pub use zerocopy::NativeEndian;
 pub use zerocopy::byteorder::{BE, F32, F64, I16, I32, I64, I128, LE, U16, U32, U64, U128};
 
 pub mod error;
-mod immutable;
 mod index;
-mod mutable;
-mod nbt;
+mod mutf8;
+mod owned;
+mod read;
 #[cfg(feature = "serde")]
 mod ser_de;
-mod util;
-mod value;
-mod view;
+mod tags;
 mod write;
 
 pub use error::{Error, Result};
-pub use immutable::read_borrowed;
-#[cfg(feature = "shared")]
-pub use immutable::read_shared;
-use mutable::IntoNBT;
-pub use mutable::{
-    CompoundOwn, ListOwn, TypedListOwn, ValueOwn, read_owned, read_owned_from_reader,
+pub use index::Index;
+pub use mutf8::{ByteOrder, MUTF8Str, MUTF8String};
+#[cfg(feature = "serde")]
+pub(crate) use mutf8::{decode_mutf8_lossy, encode_mutf8};
+pub(crate) use mutf8::{
+    EMPTY_COMPOUND, EMPTY_LIST, EMPTY_TYPED_LISTS, cold_path, same_byte_order, with_mutf8_key,
 };
-use nbt::*;
-pub use nbt::{TagID, tag};
+pub use owned::{
+    compound::{CompoundIterMut, CompoundOwn},
+    into_nbt::IntoNBT,
+    list::{ListIterMut, ListOwn, TypedListIterMut, TypedListOwn},
+    read_owned, read_owned_from_reader,
+    slot::{Mut, Scalar, ScalarMut, SlotValue},
+    value::{ValueMut, ValueOwn},
+};
+#[cfg(feature = "shared")]
+pub use read::{SharedDocument, read_shared};
+pub use read::{
+    BorrowedDocument, Document, read_borrowed, read_document,
+    view::{
+        AsCompoundRef, AsListRef, AsValueRef, CompoundIter, CompoundRef, ListIter, ListRef,
+        TypedListIter, TypedListRef, ValueRef,
+    },
+};
 #[cfg(feature = "serde")]
 pub use ser_de::*;
-pub use util::MUTF8Str;
-use util::*;
-use value::*;
-pub use value::{
-    CompoundBase, CompoundMut, CompoundRef, ListBase, ListMut, ListRef, MapMut, MapRef,
-    TypedListBase, TypedListMut, TypedListRef, ValueBase, ValueMut, ValueRef, VisitMut,
-    VisitMutShared, VisitRef, Writable,
-};
-use view::*;
+pub use tags::{Borrowed, ElementTag, Owned, Source, Tag, TagID, tag};
+pub use write::Writable;

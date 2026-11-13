@@ -8,7 +8,7 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
-use na_nbt::{CompoundRef, TypedListRef, ValueRef};
+use na_nbt::AsValueRef;
 
 pub fn bench_read_file(filename: &str, c: &mut Criterion) {
     let mut file = File::open(format!("tests/{filename}")).unwrap();
@@ -43,7 +43,7 @@ pub fn bench_read_file(filename: &str, c: &mut Criterion) {
         )
         .unwrap();
         let na_nbt_nbt = na_nbt_items_from_nbt(
-            &na_nbt::read_borrowed::<na_nbt::BigEndian>(input)
+            na_nbt::read_borrowed::<na_nbt::BigEndian>(input)
                 .unwrap()
                 .root(),
         )
@@ -77,8 +77,7 @@ pub fn bench_read_file(filename: &str, c: &mut Criterion) {
         b.iter(|| {
             let input = black_box(input);
             let nbt = black_box(na_nbt::read_borrowed::<na_nbt::BigEndian>(input)).unwrap();
-            let nbt = nbt.root();
-            black_box(na_nbt_items_from_nbt(&nbt));
+            black_box(na_nbt_items_from_nbt(nbt.root()));
         })
     });
 
@@ -119,62 +118,63 @@ pub struct ItemDisplay {
     pub color: Option<i32>,
 }
 
-fn na_nbt_items_from_nbt<'s>(nbt: &impl na_nbt::ValueRef<'s>) -> Option<Vec<Option<Item>>> {
+fn na_nbt_items_from_nbt<'s>(nbt: impl AsValueRef<'s>) -> Option<Vec<Option<Item>>> {
     use na_nbt::tag::*;
+    let nbt = nbt.as_value_ref();
     let mut items = Vec::new();
-    for item_nbt in nbt.get_::<TypedList<Compound>>("i").unwrap_or_default() {
-        if item_nbt.get_::<Short>("id").is_none() {
+    for item_nbt in nbt.get_as::<TypedList<Compound>>("i").unwrap_or_default() {
+        if item_nbt.get_as::<Short>("id").is_none() {
             items.push(None);
             continue;
         }
 
-        let item_tag = item_nbt.get_::<Compound>("tag")?;
+        let item_tag = item_nbt.get_as::<Compound>("tag")?;
         let item_extra_attributes = item_tag
-            .get_::<Compound>("ExtraAttributes")
+            .get_as::<Compound>("ExtraAttributes")
             .unwrap_or_default();
-        let item_display = item_tag.get_::<Compound>("display").unwrap_or_default();
+        let item_display = item_tag.get_as::<Compound>("display").unwrap_or_default();
 
         items.push(Some(Item {
-            id: item_nbt.get_::<Short>("id")?,
-            damage: item_nbt.get_::<Short>("Damage")?,
-            count: item_nbt.get_::<Byte>("Count")?,
+            id: item_nbt.get_as::<Short>("id")?,
+            damage: item_nbt.get_as::<Short>("Damage")?,
+            count: item_nbt.get_as::<Byte>("Count")?,
 
             head_texture_id: item_tag
                 .get("SkullOwner")
-                .and_then(|skull_owner| skull_owner.get_::<Compound>("Properties"))
-                .and_then(|props| props.get_::<TypedList<Compound>>("textures"))
+                .and_then(|skull_owner| skull_owner.get_as::<Compound>("Properties"))
+                .and_then(|props| props.get_as::<TypedList<Compound>>("textures"))
                 .and_then(|textures| textures.get(0))
-                .and_then(|texture| texture.get_::<String>("Value"))
+                .and_then(|texture| texture.get_as::<String>("Value"))
                 .map(|s| s.to_utf8_string()),
             skyblock_id: item_extra_attributes
-                .get_::<String>("id")
+                .get_as::<String>("id")
                 .map(|id| id.to_utf8_string()),
             reforge: item_extra_attributes
-                .get_::<String>("modifier")
+                .get_as::<String>("modifier")
                 .map(|id| id.to_utf8_string()),
 
             display: ItemDisplay {
                 name: item_display
-                    .get_::<String>("Name")
+                    .get_as::<String>("Name")
                     .map(|n| n.to_utf8_string())
                     .unwrap_or_default(),
                 lore: item_display
-                    .get_::<TypedList<String>>("Lore")
+                    .get_as::<TypedList<String>>("Lore")
                     .map(|l| l.into_iter().map(|s| s.to_utf8_string()).collect())
                     .unwrap_or_default(),
-                color: item_display.get_::<Int>("color"),
+                color: item_display.get_as::<Int>("color"),
                 has_glint: item_extra_attributes.get("ench").is_some(),
             },
             enchantments: item_extra_attributes
-                .get_::<Compound>("enchantments")
+                .get_as::<Compound>("enchantments")
                 .map(|c| {
                     c.into_iter()
-                        .map(|(k, v)| (k.to_utf8_string(), v.into_::<Int>().unwrap_or_default()))
+                        .map(|(k, v)| (k.to_utf8_string(), v.as_::<Int>().unwrap_or_default()))
                         .collect()
                 })
                 .unwrap_or_default(),
             timestamp: item_extra_attributes
-                .get_::<String>("timestamp")
+                .get_as::<String>("timestamp")
                 .map(|t| t.to_utf8_string()),
         }));
     }
