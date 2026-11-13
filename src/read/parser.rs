@@ -1,16 +1,106 @@
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::{
+    mem::{ManuallyDrop, MaybeUninit},
+    ptr,
+};
 
 use zerocopy::byteorder;
 
 use crate::{cold_path, ByteOrder, Error, Result, TagID};
 
 #[derive(Copy, Clone, Default, Debug)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub(crate) struct Mark {
     /// Byte length of this `List` or `Compound` payload.
     pub byte_len: u32,
     /// Distance to the next sibling mark in the flat array (`1 + nested marks`).
     pub flat_next_mark: u32,
+}
+
+pub(crate) const INLINE_MARKS: usize = 8;
+
+/// Inline-first structural index storing up to [`INLINE_MARKS`] container marks without heap
+/// allocation, spilling seamlessly to a heap buffer for larger documents.
+pub(crate) struct SmallMarks {
+    heap: *mut Mark,
+    len: usize,
+    /// `0` when marks live in `inline[..len]`; `> 0` when `heap` owns an allocation of `cap` marks.
+    cap: usize,
+    inline: [MaybeUninit<Mark>; INLINE_MARKS],
+}
+
+unsafe impl Send for SmallMarks {}
+unsafe impl Sync for SmallMarks {}
+
+impl SmallMarks {
+    #[inline(always)]
+    pub(crate) const fn new() -> Self {
+        Self {
+            heap: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_ptr(&self) -> *const Mark {
+        if self.cap == 0 {
+            self.inline.as_ptr().cast::<Mark>()
+        } else {
+            self.heap.cast_const()
+        }
+    }
+}
+
+impl Clone for SmallMarks {
+    fn clone(&self) -> Self {
+        let len = self.len;
+        if len <= INLINE_MARKS {
+            let mut out = Self::new();
+            out.len = len;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.as_ptr().cast::<MaybeUninit<Mark>>(),
+                    out.inline.as_mut_ptr(),
+                    len,
+                );
+            }
+            out
+        } else {
+            let mut v = Vec::<MaybeUninit<Mark>>::with_capacity(len);
+            let new_ptr = v.as_mut_ptr().cast::<Mark>();
+            let new_cap = v.capacity();
+            let _ = ManuallyDrop::new(v);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.heap.cast::<MaybeUninit<Mark>>(),
+                    new_ptr.cast::<MaybeUninit<Mark>>(),
+                    len,
+                );
+            }
+            Self {
+                heap: new_ptr,
+                len,
+                cap: new_cap,
+                inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
+            }
+        }
+    }
+}
+
+impl Drop for SmallMarks {
+    #[inline]
+    fn drop(&mut self) {
+        if self.cap != 0 {
+            unsafe {
+                drop(Vec::<MaybeUninit<Mark>>::from_raw_parts(
+                    self.heap.cast::<MaybeUninit<Mark>>(),
+                    0,
+                    self.cap,
+                ));
+            }
+        }
+    }
 }
 
 const INLINE_STACK_CAP: usize = 32;
@@ -95,47 +185,91 @@ impl FrameStack {
     }
 }
 
-struct MarkBuf(Vec<MaybeUninit<Mark>>);
+struct MarkBuf<'a> {
+    ptr: *mut Mark,
+    len: usize,
+    cap: usize,
+    marks: &'a mut SmallMarks,
+}
 
-impl MarkBuf {
+impl<'a> MarkBuf<'a> {
     #[inline(always)]
-    fn new() -> Self {
-        Self(Vec::new())
+    fn new(marks: &'a mut SmallMarks) -> Self {
+        debug_assert_eq!(marks.cap, 0);
+        let ptr = marks.inline.as_mut_ptr().cast::<Mark>();
+        Self {
+            ptr,
+            len: 0,
+            cap: INLINE_MARKS,
+            marks,
+        }
     }
 
     #[cold]
     #[inline(never)]
     fn reserve_slow(&mut self, additional: usize, rem_bytes: usize) {
-        if self.0.capacity() == 0 {
-            self.0
-                .reserve_exact((1 + rem_bytes / 24).max(8).max(additional));
+        let required = self.len + additional;
+        if self.marks.cap == 0 {
+            let target_cap = (self.len + 1 + rem_bytes / 24)
+                .max(INLINE_MARKS * 2)
+                .max(required);
+            let mut v = Vec::<MaybeUninit<Mark>>::with_capacity(target_cap);
+            let new_ptr = v.as_mut_ptr().cast::<Mark>();
+            let actual_cap = v.capacity();
+            let _ = ManuallyDrop::new(v);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.ptr.cast::<MaybeUninit<Mark>>(),
+                    new_ptr.cast::<MaybeUninit<Mark>>(),
+                    self.len,
+                );
+            }
+            self.marks.heap = new_ptr;
+            self.marks.cap = actual_cap;
+            self.ptr = new_ptr;
+            self.cap = actual_cap;
         } else {
-            self.0.reserve(additional);
+            self.marks.cap = 0;
+            let mut v = unsafe {
+                Vec::<MaybeUninit<Mark>>::from_raw_parts(
+                    self.ptr.cast::<MaybeUninit<Mark>>(),
+                    self.len,
+                    self.cap,
+                )
+            };
+            v.reserve(additional);
+            let new_ptr = v.as_mut_ptr().cast::<Mark>();
+            let actual_cap = v.capacity();
+            let _ = ManuallyDrop::new(v);
+            self.marks.heap = new_ptr;
+            self.marks.cap = actual_cap;
+            self.ptr = new_ptr;
+            self.cap = actual_cap;
         }
     }
 
     #[inline(always)]
     fn ensure_slots(&mut self, additional: usize, rem_bytes: usize) {
-        if self.0.capacity() - self.0.len() < additional {
+        if self.cap - self.len < additional {
             self.reserve_slow(additional, rem_bytes);
         }
     }
 
     #[inline(always)]
     fn alloc_slot(&mut self, rem_bytes: usize) -> u32 {
-        let len = self.0.len();
-        if len == self.0.capacity() {
+        let len = self.len;
+        if len == self.cap {
             self.reserve_slow(1, rem_bytes);
         }
-        unsafe { self.0.set_len(len + 1) };
+        self.len = len + 1;
         len as u32
     }
 
     #[inline(always)]
     fn push_leaf(&mut self, byte_len: u32, rem_bytes: usize) {
-        let idx = self.alloc_slot(rem_bytes);
+        let idx = self.alloc_slot(rem_bytes) as usize;
         unsafe {
-            self.0.get_unchecked_mut(idx as usize).write(Mark {
+            self.ptr.add(idx).write(Mark {
                 byte_len,
                 flat_next_mark: 1,
             });
@@ -144,9 +278,10 @@ impl MarkBuf {
 
     #[inline(always)]
     fn finish_slot(&mut self, idx: u32, byte_len: u32) {
-        let flat_next_mark = (self.0.len() - idx as usize) as u32;
+        let idx = idx as usize;
+        let flat_next_mark = (self.len - idx) as u32;
         unsafe {
-            self.0.get_unchecked_mut(idx as usize).write(Mark {
+            self.ptr.add(idx).write(Mark {
                 byte_len,
                 flat_next_mark,
             });
@@ -154,9 +289,8 @@ impl MarkBuf {
     }
 
     #[inline(always)]
-    unsafe fn into_vec(self) -> Vec<Mark> {
-        let mut me = ManuallyDrop::new(self.0);
-        unsafe { Vec::from_raw_parts(me.as_mut_ptr().cast::<Mark>(), me.len(), me.capacity()) }
+    fn commit(self) {
+        self.marks.len = self.len;
     }
 }
 
@@ -299,7 +433,7 @@ unsafe fn parse_list<O: ByteOrder>(
     }
 }
 
-pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
+pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8], out_marks: &mut SmallMarks) -> Result<()> {
     let mut pos = src.as_ptr();
     let len = src.len();
     if len == 0 {
@@ -316,7 +450,11 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
         let root_tag = *pos;
         if root_tag == 0 {
             cold_path();
-            return Ok(Vec::new());
+            return if len == 1 {
+                Ok(())
+            } else {
+                Err(Error::REMAIN(len - 1))
+            };
         }
 
         if len < 3 {
@@ -337,7 +475,7 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
             ListElement,
         }
 
-        let mut mark = MarkBuf::new();
+        let mut mark = MarkBuf::new(out_marks);
         let mut stack = FrameStack::new();
         let mut cur_start: *const u8 = pos;
         let mut cur_mark: u32 = 0;
@@ -362,7 +500,7 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
                     cold_path();
                     return Err(Error::REMAIN((end_pos as usize) - (end as usize)));
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
             9 => mode = Mode::ListElement,
             10 => {
@@ -383,7 +521,8 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8]) -> Result<Vec<Mark>> {
                             cold_path();
                             return Err(Error::REMAIN((end_pos as usize) - (pos as usize)));
                         }
-                        return Ok(mark.into_vec());
+                        mark.commit();
+                        return Ok(());
                     }
                     let top = stack.last_mut();
                     match top.kind {

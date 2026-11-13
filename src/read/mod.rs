@@ -9,7 +9,7 @@ use crate::{
     cold_path,
     index::Index,
     read::{
-        parser::{parse_marks, Mark},
+        parser::{parse_marks, Mark, SmallMarks},
         view::{read_value_advance, CompoundRef, ListRef, ValueRef},
     },
     same_byte_order,
@@ -19,10 +19,13 @@ use crate::{
 };
 
 /// A zero-copy parsed NBT document backed by buffer `B` (`&[u8]`, `bytes::Bytes`, `Vec<u8>`, etc.).
+///
+/// Small NBT documents with up to 8 `Compound`/`List` containers store their structural index
+/// inline without any heap allocation.
 #[derive(Clone)]
 pub struct Document<O: ByteOrder, B = &'static [u8]> {
     data: B,
-    marks: Vec<Mark>,
+    marks: SmallMarks,
     _marker: PhantomData<fn() -> O>,
 }
 
@@ -42,7 +45,8 @@ pub fn read_borrowed<'a, O: ByteOrder>(source: &'a [u8]) -> Result<BorrowedDocum
 /// Parses an NBT document from any buffer implementing `AsRef<[u8]>`.
 #[inline]
 pub fn read_document<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document<O, B>> {
-    let marks = parse_marks::<O>(source.as_ref())?;
+    let mut marks = SmallMarks::new();
+    parse_marks::<O>(source.as_ref(), &mut marks)?;
     Ok(Document {
         data: source,
         marks,
