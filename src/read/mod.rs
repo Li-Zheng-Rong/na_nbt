@@ -17,6 +17,8 @@ use crate::{
     AsKey, Borrowed, ByteOrder, MUTF8Str, Result, Source, Tag, TagID, EMPTY_COMPOUND, EMPTY_LIST,
 };
 
+#[cfg(feature = "serde")]
+pub(crate) use parser::{parse_marks_payload, SmallMarks as RawSmallMarks};
 
 /// A zero-copy parsed NBT document backed by buffer `B` (`&[u8]`, `bytes::Bytes`, `Vec<u8>`, etc.).
 ///

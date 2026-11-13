@@ -116,6 +116,38 @@ fn test_zero_heap_alloc_for_small_nbts_and_clean_spill() {
         "small NBT parse + clone + query must perform 0 heap allocations"
     );
 
+    #[cfg(feature = "serde")]
+    {
+        #[derive(serde::Deserialize)]
+        struct ItemSlot<'a> {
+            id: i16,
+            #[serde(rename = "Count")]
+            count: i8,
+            #[serde(borrow)]
+            tag: na_nbt::BorrowedDocument<'a>,
+        }
+
+        let (serde_allocs, ()) = count_allocs(|| {
+            let doc: na_nbt::BorrowedDocument<'_> = na_nbt::from_slice_be(&small_bytes).unwrap();
+            assert_eq!(doc.get_short("id"), Some(276));
+
+            let slot: ItemSlot<'_> = na_nbt::from_slice_be(&small_bytes).unwrap();
+            assert_eq!(slot.id, 276);
+            assert_eq!(slot.count, 1);
+            assert_eq!(
+                slot.tag
+                    .at("ExtraAttributes")
+                    .at("enchantments")
+                    .at("smite")
+                    .as_int(),
+                Some(7)
+            );
+        });
+        assert_eq!(
+            serde_allocs, 0,
+            "Serde BorrowedDocument + hybrid struct deserialization on small NBT must perform 0 heap allocations"
+        );
+    }
 
     // 2. Large NBT (> 8 containers) spills cleanly to heap and frees all memory on Drop
     let mut big = Compound::<BigEndian>::default();

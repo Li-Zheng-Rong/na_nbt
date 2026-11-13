@@ -125,6 +125,10 @@ impl ser::Serializer for TagProbe {
             "na_nbt:int_array" => Ok(TagID::IntArray),
             "na_nbt:long_array" => Ok(TagID::LongArray),
             "na_nbt:list" => Ok(TagID::List),
+            "na_nbt:end" => Ok(TagID::End),
+            "na_nbt:compound" => Ok(TagID::Compound),
+            "na_nbt:mutf8" => Ok(TagID::String),
+            _ if super::parse_empty_list_marker(name).is_some() => Ok(TagID::List),
             _ => value.serialize(self),
         }
     }

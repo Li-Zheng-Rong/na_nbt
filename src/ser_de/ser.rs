@@ -2,14 +2,17 @@ use std::{io::Write, marker::PhantomData, ptr};
 
 use base64ct::Encoding;
 use serde::{ser, Serialize};
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian, LittleEndian};
 
-use crate::{cold_path, encode_mutf8, tag_of, ByteOrder, Error, Result, TagID};
+use crate::{cold_path, encode_mutf8, tag_of, AsKey, ByteOrder, Error, Result, TagID};
 
-/// Serializes a value to a byte vector in NBT format.
+/// Serializes a value to a byte vector in NBT format with an empty root name (`""`).
 #[inline]
 pub fn to_vec<O: ByteOrder>(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
     let tag_id = tag_of(value);
+    if tag_id == TagID::End {
+        return Ok(vec![0]);
+    }
     let mut serializer = Serializer::<O> {
         vec: vec![tag_id as u8, 0, 0],
         _marker: PhantomData,
@@ -18,19 +21,89 @@ pub fn to_vec<O: ByteOrder>(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>
     Ok(serializer.vec)
 }
 
-/// Convenience function for serializing with big-endian byte order.
+/// Serializes a value to a big-endian NBT byte vector with an empty root name (`""`).
 #[inline]
 pub fn to_vec_be(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
-    to_vec::<byteorder::BigEndian>(value)
+    to_vec::<BigEndian>(value)
 }
 
-/// Convenience function for serializing with little-endian byte order.
+/// Serializes a value to a little-endian NBT byte vector with an empty root name (`""`).
 #[inline]
 pub fn to_vec_le(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
-    to_vec::<byteorder::LittleEndian>(value)
+    to_vec::<LittleEndian>(value)
 }
 
-/// Serializes a value to a writer in NBT format.
+/// Serializes a value to a byte vector in NBT format with the specified root `name`.
+#[inline]
+pub fn to_vec_named<O: ByteOrder>(
+    name: impl AsKey,
+    value: &(impl ?Sized + Serialize),
+) -> Result<Vec<u8>> {
+    let tag_id = tag_of(value);
+    if tag_id == TagID::End {
+        return Ok(vec![0]);
+    }
+    let mut vec = name.with_mutf8(|key| -> Result<Vec<u8>> {
+        let bytes = key.as_bytes();
+        if bytes.len() > u16::MAX as usize {
+            cold_path();
+            return Err(Error::LEN(bytes.len()));
+        }
+        let mut hdr = Vec::with_capacity(3 + bytes.len() + 32);
+        hdr.push(tag_id as u8);
+        hdr.extend_from_slice(&byteorder::U16::<O>::new(bytes.len() as u16).to_bytes());
+        hdr.extend_from_slice(bytes);
+        Ok(hdr)
+    })?;
+    let mut serializer = Serializer::<O> {
+        vec: std::mem::take(&mut vec),
+        _marker: PhantomData,
+    };
+    value.serialize(&mut serializer)?;
+    Ok(serializer.vec)
+}
+
+/// Serializes a value to a big-endian NBT byte vector with the specified root `name`.
+#[inline]
+pub fn to_vec_named_be(name: impl AsKey, value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
+    to_vec_named::<BigEndian>(name, value)
+}
+
+/// Serializes a value to a little-endian NBT byte vector with the specified root `name`.
+#[inline]
+pub fn to_vec_named_le(name: impl AsKey, value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
+    to_vec_named::<LittleEndian>(name, value)
+}
+
+/// Serializes a value to a nameless root NBT byte vector (`[tag_id][payload]`, Minecraft 1.20.2+
+/// network format).
+#[inline]
+pub fn to_vec_nameless<O: ByteOrder>(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
+    let tag_id = tag_of(value);
+    if tag_id == TagID::End {
+        return Ok(vec![0]);
+    }
+    let mut serializer = Serializer::<O> {
+        vec: vec![tag_id as u8],
+        _marker: PhantomData,
+    };
+    value.serialize(&mut serializer)?;
+    Ok(serializer.vec)
+}
+
+/// Serializes a value to a big-endian nameless root NBT byte vector (`[tag_id][payload]`).
+#[inline]
+pub fn to_vec_nameless_be(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
+    to_vec_nameless::<BigEndian>(value)
+}
+
+/// Serializes a value to a little-endian nameless root NBT byte vector (`[tag_id][payload]`).
+#[inline]
+pub fn to_vec_nameless_le(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
+    to_vec_nameless::<LittleEndian>(value)
+}
+
+/// Serializes a value to a writer in NBT format with an empty root name (`""`).
 #[inline]
 pub fn to_writer<O: ByteOrder>(
     writer: &mut impl Write,
@@ -40,20 +113,79 @@ pub fn to_writer<O: ByteOrder>(
     writer.write_all(&vec).map_err(Error::IO)
 }
 
-/// Convenience function for writing with big-endian byte order.
+/// Serializes a value to a writer in big-endian NBT format with an empty root name (`""`).
 #[inline]
 pub fn to_writer_be(writer: &mut impl Write, value: &(impl ?Sized + Serialize)) -> Result<()> {
-    to_writer::<byteorder::BigEndian>(writer, value)
+    to_writer::<BigEndian>(writer, value)
 }
 
-/// Convenience function for writing with little-endian byte order.
+/// Serializes a value to a writer in little-endian NBT format with an empty root name (`""`).
 #[inline]
 pub fn to_writer_le(writer: &mut impl Write, value: &(impl ?Sized + Serialize)) -> Result<()> {
-    to_writer::<byteorder::LittleEndian>(writer, value)
+    to_writer::<LittleEndian>(writer, value)
+}
+
+/// Serializes a value to a writer in NBT format with the specified root `name`.
+#[inline]
+pub fn to_writer_named<O: ByteOrder>(
+    writer: &mut impl Write,
+    name: impl AsKey,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    let vec = to_vec_named::<O>(name, value)?;
+    writer.write_all(&vec).map_err(Error::IO)
+}
+
+/// Serializes a value to a writer in big-endian NBT format with the specified root `name`.
+#[inline]
+pub fn to_writer_named_be(
+    writer: &mut impl Write,
+    name: impl AsKey,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    to_writer_named::<BigEndian>(writer, name, value)
+}
+
+/// Serializes a value to a writer in little-endian NBT format with the specified root `name`.
+#[inline]
+pub fn to_writer_named_le(
+    writer: &mut impl Write,
+    name: impl AsKey,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    to_writer_named::<LittleEndian>(writer, name, value)
+}
+
+/// Serializes a value to a writer in nameless root NBT format (`[tag_id][payload]`).
+#[inline]
+pub fn to_writer_nameless<O: ByteOrder>(
+    writer: &mut impl Write,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    let vec = to_vec_nameless::<O>(value)?;
+    writer.write_all(&vec).map_err(Error::IO)
+}
+
+/// Serializes a value to a writer in big-endian nameless root NBT format (`[tag_id][payload]`).
+#[inline]
+pub fn to_writer_nameless_be(
+    writer: &mut impl Write,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    to_writer_nameless::<BigEndian>(writer, value)
+}
+
+/// Serializes a value to a writer in little-endian nameless root NBT format (`[tag_id][payload]`).
+#[inline]
+pub fn to_writer_nameless_le(
+    writer: &mut impl Write,
+    value: &(impl ?Sized + Serialize),
+) -> Result<()> {
+    to_writer_nameless::<LittleEndian>(writer, value)
 }
 
 /// NBT serializer that writes to an internal byte vector.
-pub struct Serializer<O: ByteOrder> {
+pub struct Serializer<O: ByteOrder = BigEndian> {
     vec: Vec<u8>,
     _marker: PhantomData<O>,
 }
@@ -106,6 +238,10 @@ unsafe fn write_wrapped_list_header<O: ByteOrder>(dst: *mut u8, len: usize) -> R
 impl<O: ByteOrder> Serializer<O> {
     fn write_compound_item<T: ?Sized + Serialize>(&mut self, name: &str, value: &T) -> Result<()> {
         let tag_id = tag_of(value);
+        if tag_id == TagID::End {
+            cold_path();
+            return Err(Error::INVALID(0));
+        }
         let encoded = encode_mutf8(name);
         self.write_compound_header(tag_id, &encoded)?;
         value.serialize(&mut *self)
@@ -113,6 +249,10 @@ impl<O: ByteOrder> Serializer<O> {
 
     fn write_wrapped_item<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         let tag_id = tag_of(value);
+        if tag_id == TagID::End {
+            cold_path();
+            return Err(Error::INVALID(0));
+        }
         unsafe {
             let old_len = self.vec.len();
             self.vec.reserve(3);
@@ -311,7 +451,17 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
             "na_nbt:int_array" => value.serialize(FixedArraySerializer::<O, 4>::new(self)),
             "na_nbt:long_array" => value.serialize(FixedArraySerializer::<O, 8>::new(self)),
             "na_nbt:list" => value.serialize(ListSerializer::new(self)),
-            _ => value.serialize(&mut *self),
+            "na_nbt:end" => Ok(()),
+            "na_nbt:compound" => value.serialize(&mut *self),
+            "na_nbt:mutf8" => value.serialize(RawMutf8Serializer(&mut *self)),
+            _ => {
+                if let Some(elem_tag) = super::parse_empty_list_marker(name) {
+                    self.vec.extend_from_slice(&[elem_tag, 0, 0, 0, 0]);
+                    Ok(())
+                } else {
+                    value.serialize(&mut *self)
+                }
+            }
         }
     }
 
@@ -654,7 +804,7 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
 /// Homogeneous `TAG_List` serializer used by `na_nbt::list`.
 struct ListSerializer<'a, O: ByteOrder> {
     start_pos: usize,
-    element_tag: TagID,
+    element_tag: Option<TagID>,
     len: Option<u32>,
     serializer: &'a mut Serializer<O>,
 }
@@ -664,7 +814,7 @@ impl<'a, O: ByteOrder> ListSerializer<'a, O> {
     fn new(serializer: &'a mut Serializer<O>) -> Self {
         Self {
             start_pos: serializer.vec.len(),
-            element_tag: TagID::End,
+            element_tag: None,
             len: Some(0),
             serializer,
         }
@@ -713,14 +863,18 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
             self.len = Some(len + 1);
         }
         let tag_id = tag_of(value);
-        if self.element_tag == TagID::End {
-            cold_path();
-            self.element_tag = tag_id;
-        }
-        if self.element_tag != tag_id {
+        let expected = match self.element_tag {
+            Some(expected) => expected,
+            None => {
+                cold_path();
+                self.element_tag = Some(tag_id);
+                tag_id
+            }
+        };
+        if expected != tag_id {
             cold_path();
             return Err(Error::MISMATCH {
-                expected: self.element_tag,
+                expected,
                 actual: tag_id,
             });
         }
@@ -730,7 +884,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
     fn end(self) -> Result<()> {
         unsafe {
             let base = self.serializer.vec.as_mut_ptr().add(self.start_pos);
-            ptr::write(base, self.element_tag as u8);
+            ptr::write(base, self.element_tag.unwrap_or(TagID::End) as u8);
             if let Some(len) = self.len {
                 ptr::write(
                     base.add(1).cast::<[u8; 4]>(),
@@ -743,7 +897,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
 }
 
 /// Heterogeneous sequence serializer wrapping each element as `Compound { "" : <value> }`.
-pub struct SeqSerializer<'a, O: ByteOrder> {
+pub struct SeqSerializer<'a, O: ByteOrder = BigEndian> {
     len_pos: usize,
     len: Option<u32>,
     serializer: &'a mut Serializer<O>,
@@ -916,7 +1070,14 @@ impl<O: ByteOrder> ser::Serializer for KeySerializer<'_, O> {
         name: &'static str,
         value: &T,
     ) -> Result<()> {
-        self.write_wrapped(name, value)
+        if name == "na_nbt:mutf8" {
+            value.serialize(RawMutf8KeySerializer {
+                tag_id: self.tag_id,
+                serializer: self.serializer,
+            })
+        } else {
+            self.write_wrapped(name, value)
+        }
     }
 
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -947,7 +1108,85 @@ impl<O: ByteOrder> ser::Serializer for KeySerializer<'_, O> {
     impl_strlike_key!(serialize_i128: i128, serialize_u128: u128);
 }
 
-pub struct MapSerializer<'a, O: ByteOrder> {
+struct RawMutf8Serializer<'a, O: ByteOrder>(&'a mut Serializer<O>);
+
+impl<O: ByteOrder> ser::Serializer for RawMutf8Serializer<'_, O> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = ser::Impossible<(), Error>;
+    type SerializeTuple = ser::Impossible<(), Error>;
+
+    impl_reject_compounds!(unreachable!());
+    impl_reject_non_container!(unreachable!());
+    impl_reject_primitives!(
+        unreachable!();
+        serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+        serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
+        serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
+        serialize_str: &str,
+    );
+
+    #[inline(always)]
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.0.write_string(v)
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        unreachable!()
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        unreachable!()
+    }
+}
+
+struct RawMutf8KeySerializer<'a, O: ByteOrder> {
+    tag_id: TagID,
+    serializer: &'a mut Serializer<O>,
+}
+
+impl<O: ByteOrder> ser::Serializer for RawMutf8KeySerializer<'_, O> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = ser::Impossible<(), Error>;
+    type SerializeTuple = ser::Impossible<(), Error>;
+
+    impl_reject_compounds!(unreachable!());
+    impl_reject_non_container!(unreachable!());
+    impl_reject_primitives!(
+        unreachable!();
+        serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+        serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
+        serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
+        serialize_str: &str,
+    );
+
+    #[inline(always)]
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.serializer.write_compound_header(self.tag_id, v)
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        unreachable!()
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        unreachable!()
+    }
+}
+
+/// NBT map serializer writing entries to a `TAG_Compound`.
+pub struct MapSerializer<'a, O: ByteOrder = BigEndian> {
     tag_pos: usize,
     serializer: &'a mut Serializer<O>,
 }
@@ -968,6 +1207,10 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         debug_assert_ne!(self.tag_pos, usize::MAX);
         let tag_id = tag_of(value);
+        if tag_id == TagID::End {
+            cold_path();
+            return Err(Error::INVALID(0));
+        }
         unsafe { *self.serializer.vec.get_unchecked_mut(self.tag_pos) = tag_id as u8 };
         self.tag_pos = usize::MAX;
         value.serialize(&mut *self.serializer)
@@ -979,8 +1222,13 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
         value: &V,
     ) -> Result<()> {
         debug_assert_eq!(self.tag_pos, usize::MAX);
+        let tag_id = tag_of(value);
+        if tag_id == TagID::End {
+            cold_path();
+            return Err(Error::INVALID(0));
+        }
         key.serialize(KeySerializer {
-            tag_id: tag_of(value),
+            tag_id,
             serializer: self.serializer,
         })?;
         value.serialize(&mut *self.serializer)

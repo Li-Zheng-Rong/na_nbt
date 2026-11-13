@@ -48,25 +48,44 @@
 //! ```
 //!
 //! 3. **Serde (`to_vec_be` / `from_slice_be`)** — Direct wire-to-`struct` serialization and
-//!    deserialization without intermediate DOM allocation:
+//!    deserialization without intermediate DOM allocation, with full support for embedding dynamic
+//!    [`Compound`], [`Value`], [`List`], [`TypedList`], [`MUTF8String`], [`&MUTF8Str`](MUTF8Str),
+//!    and zero-copy [`BorrowedDocument`] fields inside typed structs:
 //! ```rust
 //! # #[cfg(feature = "serde")]
 //! # {
+//! use na_nbt::{BorrowedDocument, Compound};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize, Debug, PartialEq)]
-//! struct Address {
-//!     street: String,
-//!     city: String,
+//! struct EntityPacket {
+//!     id: i32,
+//!     #[serde(with = "na_nbt::int_array")]
+//!     pos: Vec<i32>,
+//!     metadata: Compound,
 //! }
 //!
-//! let address = Address {
-//!     street: "10 Downing Street".to_owned(),
-//!     city: "London".to_owned(),
+//! #[derive(Deserialize)]
+//! struct EntityPacketView<'a> {
+//!     id: i32,
+//!     #[serde(borrow)]
+//!     metadata: BorrowedDocument<'a>,
+//! }
+//!
+//! let mut metadata = Compound::new();
+//! metadata.insert("CustomName", "Steve");
+//! metadata.insert("Health", 20i16);
+//!
+//! let pkt = EntityPacket {
+//!     id: 7,
+//!     pos: vec![100, 64, -200],
+//!     metadata,
 //! };
-//! let bytes = na_nbt::to_vec_be(&address).unwrap();
-//! let decoded: Address = na_nbt::from_slice_be(&bytes).unwrap();
-//! assert_eq!(decoded, address);
+//! let bytes = na_nbt::to_vec_be(&pkt).unwrap();
+//!
+//! let view: EntityPacketView<'_> = na_nbt::from_slice_be(&bytes).unwrap();
+//! assert_eq!(view.id, 7);
+//! assert_eq!(view.metadata.get_short("Health"), Some(20));
 //! # }
 //! ```
 //!

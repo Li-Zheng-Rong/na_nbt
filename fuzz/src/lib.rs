@@ -1,5 +1,8 @@
 use bytes::Bytes;
-use na_nbt::{BigEndian, LittleEndian, read_borrowed, read_owned, read_owned_from_reader, read_shared};
+use na_nbt::{
+    BigEndian, BorrowedDocument, LittleEndian, Value, read_borrowed, read_owned,
+    read_owned_from_reader, read_shared,
+};
 use na_nbt::{from_slice_be, from_slice_le, to_vec_be, to_vec_le};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -142,6 +145,26 @@ pub fn test_serde(data: &[u8]) {
         }
     }
 
+    if let Ok(val) = from_slice_be::<Value<BigEndian>>(data) {
+        if let Ok(vec) = to_vec_be(&val) {
+            assert!(from_slice_be::<Value<BigEndian>>(&vec).is_ok());
+            assert!(from_slice_be::<BorrowedDocument<BigEndian>>(&vec).is_ok());
+        }
+        if let Ok(vec) = to_vec_le(&val) {
+            assert!(from_slice_le::<Value<LittleEndian>>(&vec).is_ok());
+            assert!(from_slice_le::<BorrowedDocument<LittleEndian>>(&vec).is_ok());
+        }
+    }
+    if let Ok(doc) = from_slice_be::<BorrowedDocument<BigEndian>>(data) {
+        if let Ok(vec) = to_vec_be(&doc) {
+            assert!(from_slice_be::<BorrowedDocument<BigEndian>>(&vec).is_ok());
+        }
+    }
+    if let Ok(doc) = from_slice_le::<BorrowedDocument<LittleEndian>>(data) {
+        if let Ok(vec) = to_vec_le(&doc) {
+            assert!(from_slice_le::<BorrowedDocument<LittleEndian>>(&vec).is_ok());
+        }
+    }
 }
 
 pub fn test_direct(data: &[u8]) {

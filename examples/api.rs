@@ -86,12 +86,17 @@ fn dump<'s>(value: impl AsValueRef<'s>, indent: usize) -> String {
 struct Address {
     street: String,
     city: String,
+    extra: Compound,
 }
 
 fn an_address() -> na_nbt::Result<()> {
+    let mut extra = Compound::new();
+    extra.insert("postcode", "SW1A 2AA");
+
     let address = Address {
         street: "10 Downing Street".to_owned(),
         city: "London".to_owned(),
+        extra,
     };
 
     let bytes = na_nbt::to_vec_be(&address)?;

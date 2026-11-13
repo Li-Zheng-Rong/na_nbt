@@ -53,6 +53,17 @@ impl SmallMarks {
         }
     }
 
+    #[cfg(feature = "serde")]
+    #[inline(always)]
+    pub(crate) const fn with_payload_tag(tag_id: TagID) -> Self {
+        Self {
+            heap: ptr::null_mut(),
+            len: 0,
+            cap: (tag_id as usize) << MODE_SHIFT,
+            inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
+        }
+    }
+
     #[inline(always)]
     pub(crate) const fn mode(&self) -> u8 {
         (self.cap >> MODE_SHIFT) as u8

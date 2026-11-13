@@ -32,6 +32,7 @@ pub mod byte_array {
 
     use serde::{de::Visitor, Deserializer, Serializer};
 
+    /// Serializes a `&[i8]` slice as an NBT `TAG_Byte_Array`.
     pub fn serialize<S: Serializer>(data: &[i8], serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(unsafe {
             slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len())
@@ -57,6 +58,7 @@ pub mod byte_array {
         }
     }
 
+    /// Deserializes an NBT `TAG_Byte_Array` into a `Vec<i8>`.
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<i8>, D::Error> {
         deserializer.deserialize_bytes(ByteArrayVisitor)
     }
@@ -102,6 +104,7 @@ macro_rules! define_typed_array_marker {
                 }
             }
 
+            #[doc = concat!("Serializes a slice of elements as an NBT `", $doc_tag, "`.")]
             #[inline]
             pub fn serialize<T, S>(data: &[T], serializer: S) -> Result<S::Ok, S::Error>
             where
@@ -139,6 +142,7 @@ macro_rules! define_typed_array_marker {
                 }
             }
 
+            #[doc = concat!("Deserializes an NBT `", $doc_tag, "` into a `Vec<T>`.")]
             #[inline]
             pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
             where
@@ -208,6 +212,7 @@ pub mod list {
         }
     }
 
+    /// Serializes a homogeneous iterable sequence directly as an NBT `TAG_List`.
     pub fn serialize<T, S>(data: T, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: IntoIterator,
@@ -227,6 +232,13 @@ pub mod list {
             f.write_str("a list")
         }
 
+        fn visit_newtype_struct<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Vec<T>, D::Error> {
+            deserializer.deserialize_seq(self)
+        }
+
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
             let mut vec = Vec::with_capacity(super::cautious_capacity::<T>(seq.size_hint()));
             while let Some(item) = seq.next_element()? {
@@ -236,6 +248,7 @@ pub mod list {
         }
     }
 
+    /// Deserializes a homogeneous NBT `TAG_List` into a `Vec<T>`.
     pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<T>, D::Error> {

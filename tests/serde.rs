@@ -2148,3 +2148,305 @@ fn test_fixed_prim_seq_all_types_mismatch_and_remain() {
         Err(na_nbt::Error::REMAIN(4))
     ));
 }
+
+#[test]
+fn test_serde_dom_interoperability_and_hybrid_structs() {
+    use na_nbt::{
+        read_borrowed_be, BigEndian, BorrowedDocument, Compound, List, LittleEndian, MUTF8Str,
+        MUTF8String, TypedList, Value,
+    };
+
+    #[derive(Debug, PartialEq, Serialize)]
+    struct HybridSource {
+        id: i16,
+        dyn_val: Value<BigEndian>,
+        comp: Compound<BigEndian>,
+        list: List<BigEndian>,
+        typed_ints: TypedList<i32, BigEndian>,
+        typed_strs: TypedList<str, BigEndian>,
+        typed_ia: TypedList<[i32], BigEndian>,
+        mutf8_owned: MUTF8String,
+        mutf8_nul: MUTF8String,
+        mutf8_map: HashMap<MUTF8String, i32>,
+        raw_sub: Compound<BigEndian>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HybridBorrowedTarget<'a> {
+        id: i16,
+        dyn_val: Value<BigEndian>,
+        comp: Compound<LittleEndian>,
+        list: List<BigEndian>,
+        typed_ints: TypedList<i32, LittleEndian>,
+        typed_strs: TypedList<str, BigEndian>,
+        typed_ia: TypedList<[i32], BigEndian>,
+        #[serde(borrow)]
+        mutf8_owned: &'a MUTF8Str,
+        #[serde(borrow)]
+        mutf8_nul: &'a MUTF8Str,
+        #[serde(borrow)]
+        mutf8_map: HashMap<&'a MUTF8Str, i32>,
+        #[serde(borrow)]
+        raw_sub: BorrowedDocument<'a, BigEndian>,
+    }
+
+    let mut comp = Compound::<BigEndian>::new();
+    comp.insert("hp", 20i16);
+    comp.insert("tag_bytes", vec![1i8, -2, 3]);
+
+    let mut list = List::<BigEndian>::new();
+    list.push("alpha");
+    list.push("beta");
+
+    let mut typed_ints = TypedList::<i32, BigEndian>::new();
+    typed_ints.extend_from_slice(&[10, 20, 30]);
+
+    let mut typed_strs = TypedList::<str, BigEndian>::new();
+    typed_strs.push("s1");
+    typed_strs.push("s\0nul");
+
+    let mut typed_ia = TypedList::<[i32], BigEndian>::new();
+    typed_ia.push([7i32, 8]);
+
+    let mut mutf8_map = HashMap::new();
+    mutf8_map.insert(MUTF8String::from("k\0nul"), 77);
+    mutf8_map.insert(MUTF8String::from("plain"), 88);
+
+    let mut raw_sub = Compound::<BigEndian>::new();
+    raw_sub.insert("nested_int", 999i32);
+    let mut sub_inner = Compound::<BigEndian>::new();
+    sub_inner.insert("msg", "inside_borrowed_doc");
+    raw_sub.insert("inner", sub_inner);
+
+    let src = HybridSource {
+        id: 276,
+        dyn_val: Value::IntArray(vec![1.into(), 2.into(), 3.into()]),
+        comp: comp.clone(),
+        list: list.clone(),
+        typed_ints: typed_ints.clone(),
+        typed_strs: typed_strs.clone(),
+        typed_ia: typed_ia.clone(),
+        mutf8_owned: MUTF8String::from("ascii_mutf8"),
+        mutf8_nul: MUTF8String::from("zero\0copy\0mutf8"),
+        mutf8_map,
+        raw_sub: raw_sub.clone(),
+    };
+
+    let be_bytes = to_vec_be(&src).unwrap();
+    let ptr_range = be_bytes.as_ptr_range();
+
+    let target: HybridBorrowedTarget<'_> = from_slice_be(&be_bytes).unwrap();
+    assert_eq!(target.id, 276);
+    assert_eq!(target.dyn_val, src.dyn_val);
+    assert_eq!(target.comp, comp.as_ref());
+    assert_eq!(target.list, list);
+    assert_eq!(target.typed_ints, typed_ints.as_ref());
+    assert_eq!(target.typed_strs, typed_strs);
+    assert_eq!(target.typed_ia, typed_ia);
+    assert_eq!(target.mutf8_owned.decode_lossy(), "ascii_mutf8");
+    assert_eq!(target.mutf8_nul.decode_lossy(), "zero\0copy\0mutf8");
+    // Lossless zero-copy MUTF-8 even with embedded NUL (0xC0 0x80)!
+    assert!(ptr_range.contains(&target.mutf8_owned.as_bytes().as_ptr()));
+    assert!(ptr_range.contains(&target.mutf8_nul.as_bytes().as_ptr()));
+
+    let nul_key = MUTF8String::from("k\0nul");
+    let (&borrowed_key, &val) = target
+        .mutf8_map
+        .get_key_value(nul_key.as_mutf8_str())
+        .unwrap();
+    assert_eq!(val, 77);
+    assert!(ptr_range.contains(&borrowed_key.as_bytes().as_ptr()));
+
+    assert_eq!(target.raw_sub.get_int("nested_int"), Some(999));
+    assert_eq!(
+        target.raw_sub.at("inner").at("msg").as_str().as_deref(),
+        Some("inside_borrowed_doc")
+    );
+    assert_eq!(target.raw_sub, Value::Compound(raw_sub.clone()));
+
+    // Endian mismatch check: BorrowedDocument<BigEndian> must reject LittleEndian input
+    let le_bytes = to_vec_le(&src).unwrap();
+    assert!(from_slice_le::<BorrowedDocument<'_, BigEndian>>(&le_bytes).is_err());
+    let le_doc: BorrowedDocument<'_, LittleEndian> = from_slice_le(&le_bytes).unwrap();
+    assert_eq!(le_doc.get_short("id"), Some(276));
+
+    // Direct serialization of Document, ValueRef, CompoundRef, ListRef, TypedListRef, ValueMut, Mut
+    let borrowed_full = read_borrowed_be(&be_bytes).unwrap();
+    assert_eq!(to_vec_be(&borrowed_full).unwrap(), be_bytes);
+    assert_eq!(to_vec_be(&borrowed_full.root()).unwrap(), be_bytes);
+
+    let mut owned_val = Value::Compound(comp.clone());
+    assert_eq!(
+        from_slice_be::<Compound>(&to_vec_be(&owned_val.as_mut()).unwrap()).unwrap(),
+        comp
+    );
+    {
+        let c_mut = owned_val.as_compound_mut().unwrap();
+        assert_eq!(
+            from_slice_be::<Compound>(&to_vec_be(&c_mut).unwrap()).unwrap(),
+            comp
+        );
+    }
+}
+
+#[test]
+fn test_serde_flatten_with_compound_and_empty_typed_list_preservation() {
+    use na_nbt::{read_borrowed_be, BigEndian, Compound, TagID, TypedList, Value};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct ItemWithFlatten {
+        id: String,
+        count: i8,
+        #[serde(flatten)]
+        extra: Compound<BigEndian>,
+    }
+
+    let mut extra = Compound::<BigEndian>::new();
+    extra.insert("CustomModelData", 12345i32);
+    extra.insert("Unbreakable", true);
+    let mut nested = Compound::<BigEndian>::new();
+    nested.insert("owner", "Herobrine");
+    extra.insert("meta", nested);
+
+    let item = ItemWithFlatten {
+        id: "minecraft:diamond_sword".into(),
+        count: 1,
+        extra,
+    };
+
+    let bytes = to_vec_be(&item).unwrap();
+    let doc = read_borrowed_be(&bytes).unwrap();
+    assert_eq!(doc.get_int("CustomModelData"), Some(12345));
+    assert_eq!(doc.get_bool("Unbreakable"), Some(true));
+    assert_eq!(
+        doc.at("meta").at("owner").as_str().as_deref(),
+        Some("Herobrine")
+    );
+
+    let decoded: ItemWithFlatten = from_slice_be(&bytes).unwrap();
+    assert_eq!(decoded, item);
+
+    // Empty TypedList<T> serialized via Serde must preserve its exact element_tag_id!
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct EmptyLists {
+        empty_ints: TypedList<i32>,
+        empty_strs: TypedList<str>,
+        empty_comps: TypedList<Compound>,
+    }
+
+    let empty_lists = EmptyLists {
+        empty_ints: TypedList::new(),
+        empty_strs: TypedList::new(),
+        empty_comps: TypedList::new(),
+    };
+    let el_bytes = to_vec_be(&empty_lists).unwrap();
+    let el_doc = read_borrowed_be(&el_bytes).unwrap();
+    assert_eq!(
+        el_doc.get_list("empty_ints").unwrap().element_tag_id(),
+        TagID::Int
+    );
+    assert_eq!(
+        el_doc.get_list("empty_strs").unwrap().element_tag_id(),
+        TagID::String
+    );
+    assert_eq!(
+        el_doc.get_list("empty_comps").unwrap().element_tag_id(),
+        TagID::Compound
+    );
+    let el_decoded: EmptyLists = from_slice_be(&el_bytes).unwrap();
+    assert_eq!(el_decoded, empty_lists);
+
+    // Root Value::End round-trips to [0], while Value::End inside a compound field fails cleanly
+    let end_bytes = to_vec_be(&Value::<BigEndian>::End).unwrap();
+    assert_eq!(end_bytes, vec![0]);
+    assert_eq!(
+        from_slice_be::<Value<BigEndian>>(&end_bytes).unwrap(),
+        Value::End
+    );
+
+    #[derive(Serialize)]
+    struct BadStruct {
+        bad: Value<BigEndian>,
+    }
+    assert!(to_vec_be(&BadStruct { bad: Value::End }).is_err());
+}
+
+#[test]
+fn test_serde_named_and_nameless_entrypoints() {
+    use na_nbt::{
+        from_reader_nameless_be, from_reader_nameless_le, from_slice_nameless_be,
+        from_slice_nameless_le, read_borrowed_be, read_borrowed_nameless_be, to_vec_named_be,
+        to_vec_named_le, to_vec_nameless_be, to_vec_nameless_le, to_writer_named_be,
+        to_writer_named_le, to_writer_nameless_be, to_writer_nameless_le, Value,
+    };
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct PacketData {
+        protocol: i32,
+        motd: String,
+    }
+
+    let pkt = PacketData {
+        protocol: 767,
+        motd: "Minecraft 1.21".into(),
+    };
+
+    // Named Serde root
+    let named_be = to_vec_named_be("ServerStatus", &pkt).unwrap();
+    let mut named_w_be = Vec::new();
+    to_writer_named_be(&mut named_w_be, "ServerStatus", &pkt).unwrap();
+    assert_eq!(named_be, named_w_be);
+
+    let doc = read_borrowed_be(&named_be).unwrap();
+    assert_eq!(doc.root_name().unwrap().decode_lossy(), "ServerStatus");
+    assert_eq!(from_slice_be::<PacketData>(&named_be).unwrap(), pkt);
+
+    let named_le = to_vec_named_le("ServerStatus", &pkt).unwrap();
+    let mut named_w_le = Vec::new();
+    to_writer_named_le(&mut named_w_le, "ServerStatus", &pkt).unwrap();
+    assert_eq!(named_le, named_w_le);
+    assert_eq!(from_slice_le::<PacketData>(&named_le).unwrap(), pkt);
+
+    // Nameless Serde root (1.20.2+ network format)
+    let nameless_be = to_vec_nameless_be(&pkt).unwrap();
+    assert_eq!(nameless_be.len(), to_vec_be(&pkt).unwrap().len() - 2);
+    let mut nameless_w_be = Vec::new();
+    to_writer_nameless_be(&mut nameless_w_be, &pkt).unwrap();
+    assert_eq!(nameless_be, nameless_w_be);
+
+    assert_eq!(
+        from_slice_nameless_be::<PacketData>(&nameless_be).unwrap(),
+        pkt
+    );
+    assert_eq!(
+        from_reader_nameless_be::<PacketData, _>(nameless_be.as_slice()).unwrap(),
+        pkt
+    );
+    assert_eq!(
+        read_borrowed_nameless_be(&nameless_be)
+            .unwrap()
+            .get_int("protocol"),
+        Some(767)
+    );
+
+    let nameless_le = to_vec_nameless_le(&pkt).unwrap();
+    let mut nameless_w_le = Vec::new();
+    to_writer_nameless_le(&mut nameless_w_le, &pkt).unwrap();
+    assert_eq!(nameless_le, nameless_w_le);
+    assert_eq!(
+        from_slice_nameless_le::<PacketData>(&nameless_le).unwrap(),
+        pkt
+    );
+    assert_eq!(
+        from_reader_nameless_le::<PacketData, _>(nameless_le.as_slice()).unwrap(),
+        pkt
+    );
+
+    // Nameless Value::End ([0])
+    let nameless_end = to_vec_nameless_be(&Value::<na_nbt::BigEndian>::End).unwrap();
+    assert_eq!(nameless_end, vec![0]);
+    assert_eq!(
+        from_slice_nameless_be::<Value>(&nameless_end).unwrap(),
+        Value::End
+    );
+}

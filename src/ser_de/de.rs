@@ -11,13 +11,12 @@ use serde::{
     de::{self, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess},
     Deserialize,
 };
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian, LittleEndian};
 
 use crate::{cold_path, decode_mutf8_lossy, ByteOrder, Error, Result, TagID};
 
-/// Deserializes a value from a byte slice in NBT format.
+/// Deserializes a value from a byte slice in NBT format (`[tag_id][name_len][name][payload]`).
 ///
-/// The input must contain the root tag ID byte followed by the root name and payload.
 /// Trailing unconsumed bytes return [`Error::REMAIN`].
 #[inline]
 pub fn from_slice<'de, O: ByteOrder, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
@@ -31,19 +30,47 @@ pub fn from_slice<'de, O: ByteOrder, T: Deserialize<'de>>(input: &'de [u8]) -> R
     }
 }
 
-/// Convenience function for deserializing with big-endian byte order.
+/// Deserializes a value from a big-endian NBT byte slice.
 #[inline]
 pub fn from_slice_be<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
-    from_slice::<byteorder::BigEndian, T>(input)
+    from_slice::<BigEndian, T>(input)
 }
 
-/// Convenience function for deserializing with little-endian byte order.
+/// Deserializes a value from a little-endian NBT byte slice.
 #[inline]
 pub fn from_slice_le<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
-    from_slice::<byteorder::LittleEndian, T>(input)
+    from_slice::<LittleEndian, T>(input)
 }
 
-/// Deserializes a value from a reader in NBT format.
+/// Deserializes a value from a nameless root NBT byte slice (`[tag_id][payload]`, Minecraft
+/// 1.20.2+ network format).
+///
+/// Trailing unconsumed bytes return [`Error::REMAIN`].
+#[inline]
+pub fn from_slice_nameless<'de, O: ByteOrder, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
+    let mut deserializer = Deserializer::<O>::from_slice_nameless(input)?;
+    let value = T::deserialize(&mut deserializer)?;
+    if deserializer.input.is_empty() {
+        Ok(value)
+    } else {
+        cold_path();
+        Err(Error::REMAIN(deserializer.input.len()))
+    }
+}
+
+/// Deserializes a value from a big-endian nameless root NBT byte slice (`[tag_id][payload]`).
+#[inline]
+pub fn from_slice_nameless_be<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
+    from_slice_nameless::<BigEndian, T>(input)
+}
+
+/// Deserializes a value from a little-endian nameless root NBT byte slice (`[tag_id][payload]`).
+#[inline]
+pub fn from_slice_nameless_le<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
+    from_slice_nameless::<LittleEndian, T>(input)
+}
+
+/// Deserializes a value from a reader in NBT format (`[tag_id][name_len][name][payload]`).
 #[inline]
 pub fn from_reader<O: ByteOrder, T, R: Read>(mut reader: R) -> Result<T>
 where
@@ -54,20 +81,44 @@ where
     from_slice::<O, T>(&buf)
 }
 
-/// Convenience function for reading from a reader with big-endian byte order.
+/// Deserializes a value from a reader in big-endian NBT format.
 #[inline]
 pub fn from_reader_be<T: for<'de> Deserialize<'de>, R: Read>(reader: R) -> Result<T> {
-    from_reader::<byteorder::BigEndian, T, R>(reader)
+    from_reader::<BigEndian, T, R>(reader)
 }
 
-/// Convenience function for reading from a reader with little-endian byte order.
+/// Deserializes a value from a reader in little-endian NBT format.
 #[inline]
 pub fn from_reader_le<T: for<'de> Deserialize<'de>, R: Read>(reader: R) -> Result<T> {
-    from_reader::<byteorder::LittleEndian, T, R>(reader)
+    from_reader::<LittleEndian, T, R>(reader)
+}
+
+/// Deserializes a value from a reader in nameless root NBT format (`[tag_id][payload]`).
+#[inline]
+pub fn from_reader_nameless<O: ByteOrder, T, R: Read>(mut reader: R) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).map_err(Error::IO)?;
+    from_slice_nameless::<O, T>(&buf)
+}
+
+/// Deserializes a value from a reader in big-endian nameless root NBT format (`[tag_id][payload]`).
+#[inline]
+pub fn from_reader_nameless_be<T: for<'de> Deserialize<'de>, R: Read>(reader: R) -> Result<T> {
+    from_reader_nameless::<BigEndian, T, R>(reader)
+}
+
+/// Deserializes a value from a reader in little-endian nameless root NBT format
+/// (`[tag_id][payload]`).
+#[inline]
+pub fn from_reader_nameless_le<T: for<'de> Deserialize<'de>, R: Read>(reader: R) -> Result<T> {
+    from_reader_nameless::<LittleEndian, T, R>(reader)
 }
 
 /// NBT deserializer that reads from a byte slice.
-pub struct Deserializer<'de, O: ByteOrder> {
+pub struct Deserializer<'de, O: ByteOrder = BigEndian> {
     current_tag: TagID,
     input: &'de [u8],
     marker: PhantomData<O>,
@@ -120,13 +171,17 @@ macro_rules! impl_parse_endian {
 }
 
 impl<'de, O: ByteOrder> Deserializer<'de, O> {
-    /// Parses the root tag header (tag ID + name) and advances to the root value's payload.
+    /// Parses the root tag header (`[tag_id][name_len][name]`, or `[0]` for `TAG_End`) and
+    /// advances to the root value's payload.
     pub fn from_slice(input: &'de [u8]) -> Result<Self> {
         check_bounds!(1, input);
         let tag_id = TagID::from_u8(input[0])?;
         if tag_id.is_end() {
-            cold_path();
-            return Err(Error::INVALID(tag_id as u8));
+            return Ok(Self {
+                current_tag: TagID::End,
+                input: &input[1..],
+                marker: PhantomData,
+            });
         }
         check_bounds!(3, input);
         let name_len =
@@ -135,6 +190,17 @@ impl<'de, O: ByteOrder> Deserializer<'de, O> {
         Ok(Self {
             current_tag: tag_id,
             input: &input[3 + name_len as usize..],
+            marker: PhantomData,
+        })
+    }
+
+    /// Parses a nameless root tag header (`[tag_id]`) and advances to the root value's payload.
+    pub fn from_slice_nameless(input: &'de [u8]) -> Result<Self> {
+        check_bounds!(1, input);
+        let tag_id = TagID::from_u8(input[0])?;
+        Ok(Self {
+            current_tag: tag_id,
+            input: &input[1..],
             marker: PhantomData,
         })
     }
@@ -178,14 +244,19 @@ impl<'de, O: ByteOrder> Deserializer<'de, O> {
     }
 
     #[inline]
-    fn parse_str(&mut self) -> Result<Cow<'de, str>> {
+    fn parse_raw_str(&mut self) -> Result<&'de [u8]> {
         check_bounds!(2, self.input);
         let len =
             byteorder::U16::<O>::from_bytes(unsafe { *self.input.as_ptr().cast() }).get() as usize;
         check_bounds!(2 + len, self.input);
-        let value = decode_mutf8_lossy(&self.input[2..2 + len]);
+        let raw = &self.input[2..2 + len];
         self.input = &self.input[2 + len..];
-        Ok(value)
+        Ok(raw)
+    }
+
+    #[inline]
+    fn parse_str(&mut self) -> Result<Cow<'de, str>> {
+        Ok(decode_mutf8_lossy(self.parse_raw_str()?))
     }
 
     #[inline]
@@ -523,6 +594,12 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
                     self.visit_homogeneous_seq(tag_id, length, visitor)
                 })
             }
+            "na_nbt:mutf8" => {
+                check_tag!(TagID::String, self.current_tag, {
+                    visitor.visit_borrowed_bytes(self.parse_raw_str()?)
+                })
+            }
+            "na_nbt:raw_nbt" => visitor.visit_enum(RawNbtAccess { deserializer: self }),
             _ => visitor.visit_newtype_struct(self),
         }
     }
@@ -606,6 +683,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         }
 
         match self.current_tag {
+            TagID::End => {}
             p if p.is_primitive() => self.skip_bytes(tag_size(p))?,
             a if a.is_array() => {
                 check_bounds!(4, self.input);
@@ -972,7 +1050,8 @@ macro_rules! impl_key_parse {
     ($($name:ident: $visit:ident, $ty:ty),* $(,)?) => {
         $(
             fn $name<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-                visitor.$visit(self.name.parse::<$ty>().map_err(|e| Error::MSG(e.to_string()))?)
+                let s = self.into_cow();
+                visitor.$visit(s.parse::<$ty>().map_err(|e| Error::MSG(e.to_string()))?)
             }
         )*
     };
@@ -1002,8 +1081,30 @@ fn strip_wrapped_key<'a>(
     }
 }
 
+enum KeySource<'de> {
+    Raw(&'de [u8]),
+    Decoded(Cow<'de, str>),
+}
+
 struct KeyDeserializer<'de> {
-    name: Cow<'de, str>,
+    source: KeySource<'de>,
+}
+
+impl<'de> KeyDeserializer<'de> {
+    #[inline]
+    fn from_raw(raw: &'de [u8]) -> Self {
+        Self {
+            source: KeySource::Raw(raw),
+        }
+    }
+
+    #[inline]
+    fn into_cow(self) -> Cow<'de, str> {
+        match self.source {
+            KeySource::Raw(raw) => decode_mutf8_lossy(raw),
+            KeySource::Decoded(cow) => cow,
+        }
+    }
 }
 
 impl<'de> de::Deserializer<'de> for KeyDeserializer<'de> {
@@ -1014,7 +1115,7 @@ impl<'de> de::Deserializer<'de> for KeyDeserializer<'de> {
     }
 
     fn deserialize_str<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visit_cow_str(self.name, visitor)
+        visit_cow_str(self.into_cow(), visitor)
     }
 
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
@@ -1022,8 +1123,9 @@ impl<'de> de::Deserializer<'de> for KeyDeserializer<'de> {
     }
 
     fn deserialize_bytes<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let name = self.into_cow();
         visitor.visit_byte_buf(
-            base64ct::Base64::decode_vec(&self.name).map_err(|e| Error::MSG(e.to_string()))?,
+            base64ct::Base64::decode_vec(&name).map_err(|e| Error::MSG(e.to_string()))?,
         )
     }
 
@@ -1032,37 +1134,36 @@ impl<'de> de::Deserializer<'de> for KeyDeserializer<'de> {
     }
 
     fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        if self.name == "None" {
+        let name = self.into_cow();
+        if name == "None" {
             visitor.visit_none()
         } else {
-            let inner = strip_wrapped_key(self.name, "Some", "'Some(<value>)' or 'None'")?;
-            visitor.visit_some(KeyDeserializer { name: inner })
+            let inner = strip_wrapped_key(name, "Some", "'Some(<value>)' or 'None'")?;
+            visitor.visit_some(KeyDeserializer {
+                source: KeySource::Decoded(inner),
+            })
         }
     }
 
     fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        if self.name.is_empty() {
+        let name = self.into_cow();
+        if name.is_empty() {
             visitor.visit_unit()
         } else {
-            Err(Error::MSG(format!(
-                "expected empty string, got '{}'",
-                self.name
-            )))
+            Err(Error::MSG(format!("expected empty string, got '{name}'")))
         }
     }
 
     fn deserialize_unit_struct<V: de::Visitor<'de>>(
         self,
-        name: &'static str,
+        expected: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        if self.name == name {
+        let name = self.into_cow();
+        if name == expected {
             visitor.visit_unit()
         } else {
-            Err(Error::MSG(format!(
-                "expected '{name}', got '{}'",
-                self.name
-            )))
+            Err(Error::MSG(format!("expected '{expected}', got '{name}'")))
         }
     }
 
@@ -1071,8 +1172,16 @@ impl<'de> de::Deserializer<'de> for KeyDeserializer<'de> {
         name: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        let inner = strip_wrapped_key(self.name, name, &format!("'{name}(<value>)'"))?;
-        visitor.visit_newtype_struct(KeyDeserializer { name: inner })
+        if name == "na_nbt:mutf8" {
+            return match self.source {
+                KeySource::Raw(raw) => visitor.visit_borrowed_bytes(raw),
+                KeySource::Decoded(cow) => visit_cow_str(cow, visitor),
+            };
+        }
+        let inner = strip_wrapped_key(self.into_cow(), name, &format!("'{name}(<value>)'"))?;
+        visitor.visit_newtype_struct(KeyDeserializer {
+            source: KeySource::Decoded(inner),
+        })
     }
 
     fn deserialize_seq<V: de::Visitor<'de>>(self, _: V) -> Result<V::Value> {
@@ -1203,8 +1312,8 @@ impl<'de, O: ByteOrder> MapAccess<'de> for CompoundAccess<'_, 'de, O> {
         if self.deserializer.current_tag.is_end() {
             return Ok(None);
         }
-        let name = self.deserializer.parse_str()?;
-        seed.deserialize(KeyDeserializer { name }).map(Some)
+        let raw = self.deserializer.parse_raw_str()?;
+        seed.deserialize(KeyDeserializer::from_raw(raw)).map(Some)
     }
 
     fn next_value_seed<V: de::DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value> {
@@ -1231,8 +1340,8 @@ impl<'de, O: ByteOrder> EnumAccess<'de> for EnumVariantAccess<'_, 'de, O> {
             return Err(Error::INVALID(self.deserializer.current_tag as u8));
         }
         self.deserializer.input = &self.deserializer.input[1..];
-        let name = self.deserializer.parse_str()?;
-        Ok((seed.deserialize(KeyDeserializer { name })?, self))
+        let raw = self.deserializer.parse_raw_str()?;
+        Ok((seed.deserialize(KeyDeserializer::from_raw(raw))?, self))
     }
 }
 
@@ -1265,5 +1374,84 @@ impl<'de, O: ByteOrder> VariantAccess<'de> for EnumVariantAccess<'_, 'de, O> {
         let value = de::Deserializer::deserialize_map(&mut *self.deserializer, visitor)?;
         self.deserializer.consume_end_tag()?;
         Ok(value)
+    }
+}
+
+struct RawNbtHeaderSeq<'de> {
+    header: u8,
+    input: &'de [u8],
+    step: u8,
+}
+
+impl<'de> SeqAccess<'de> for RawNbtHeaderSeq<'de> {
+    type Error = Error;
+
+    #[inline]
+    fn next_element_seed<T: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>> {
+        match self.step {
+            0 => {
+                self.step = 1;
+                seed.deserialize(self.header.into_deserializer()).map(Some)
+            }
+            1 => {
+                self.step = 2;
+                seed.deserialize(de::value::BorrowedBytesDeserializer::new(self.input))
+                    .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+struct RawNbtAccess<'a, 'de: 'a, O: ByteOrder> {
+    deserializer: &'a mut Deserializer<'de, O>,
+}
+
+impl<'de, O: ByteOrder> EnumAccess<'de> for RawNbtAccess<'_, 'de, O> {
+    type Error = Error;
+    type Variant = Self;
+
+    #[inline]
+    fn variant_seed<V: de::DeserializeSeed<'de>>(
+        self,
+        seed: V,
+    ) -> Result<(V::Value, Self::Variant)> {
+        let is_be = const { crate::same_byte_order::<O, BigEndian>() };
+        let header = (self.deserializer.current_tag as u8) | ((is_be as u8) << 7);
+        let val = seed.deserialize(de::value::SeqAccessDeserializer::new(RawNbtHeaderSeq {
+            header,
+            input: self.deserializer.input,
+            step: 0,
+        }))?;
+        Ok((val, self))
+    }
+}
+
+impl<'de, O: ByteOrder> VariantAccess<'de> for RawNbtAccess<'_, 'de, O> {
+    type Error = Error;
+
+    fn unit_variant(self) -> Result<()> {
+        unreachable!()
+    }
+
+    fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(self, _: T) -> Result<T::Value> {
+        unreachable!()
+    }
+
+    #[inline]
+    fn tuple_variant<V: de::Visitor<'de>>(self, consumed: usize, visitor: V) -> Result<V::Value> {
+        self.deserializer.input = &self.deserializer.input[consumed..];
+        visitor.visit_unit()
+    }
+
+    fn struct_variant<V: de::Visitor<'de>>(
+        self,
+        _: &'static [&'static str],
+        _: V,
+    ) -> Result<V::Value> {
+        unreachable!()
     }
 }
