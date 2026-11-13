@@ -176,21 +176,13 @@ pub trait ListMut<'s>:
     where
         's: 'a,
     {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        if !(self.element_tag_id() == T::TAG_ID
-            || (self.element_tag_id() == TagID::End && self.is_empty()))
-        {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get(
-                T::TAG_ID,
+            Self::Config::read::<T>(Self::Config::list_get_typed::<T>(
                 self._to_read_params(),
                 index,
             ))
@@ -224,21 +216,13 @@ pub trait ListMut<'s>:
     where
         's: 'a,
     {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        if !(self.element_tag_id() == T::TAG_ID
-            || (self.element_tag_id() == TagID::End && self.is_empty()))
-        {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
         unsafe {
-            Self::Config::read_mut::<T>(Self::Config::list_get(
-                T::TAG_ID,
+            Self::Config::read_mut::<T>(Self::Config::list_get_typed::<T>(
                 self._to_read_params(),
                 index,
             ))
@@ -283,16 +267,7 @@ pub trait ListMut<'s>:
             return None;
         }
 
-        unsafe {
-            if !T::can_take_list_elem::<Self::Config>(self._to_read_params(), len - 1) {
-                cold_path();
-                return None;
-            }
-            T::own_into_(Self::Config::list_pop_value(
-                T::TAG_ID,
-                self._to_write_params(),
-            ))
-        }
+        unsafe { T::list_pop_static(self, len) }
     }
 
     #[inline]
@@ -347,17 +322,7 @@ pub trait ListMut<'s>:
             return None;
         }
 
-        unsafe {
-            if !T::can_take_list_elem::<Self::Config>(self._to_read_params(), index) {
-                cold_path();
-                return None;
-            }
-            T::own_into_(Self::Config::list_remove_value(
-                T::TAG_ID,
-                self._to_write_params(),
-                index,
-            ))
-        }
+        unsafe { T::list_remove_static(self, index) }
     }
 
     fn typed_<T: NBT>(self) -> Option<<Self::Config as ConfigMut>::TypedListMut<'s, T>>;
@@ -409,11 +374,8 @@ pub trait TypedListMut<'s, T: NBT>:
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get(
-                T::TAG_ID,
-                self._to_read_params(),
-                index,
-            ))
+            let mut params = Self::Config::list_get_typed::<T>(self._to_read_params(), index);
+            Some(T::read_advance_nbt::<Self::Config>(&mut params))
         }
     }
 
@@ -428,11 +390,8 @@ pub trait TypedListMut<'s, T: NBT>:
         }
 
         unsafe {
-            Self::Config::read_mut::<T>(Self::Config::list_get(
-                T::TAG_ID,
-                self._to_read_params(),
-                index,
-            ))
+            let params = Self::Config::list_get_typed::<T>(self._to_read_params(), index);
+            Some(T::read_mut_nbt::<Self::Config>(params))
         }
     }
 
@@ -448,12 +407,7 @@ pub trait TypedListMut<'s, T: NBT>:
             return None;
         }
 
-        unsafe {
-            T::own_into_(Self::Config::list_pop_value(
-                T::TAG_ID,
-                self._to_write_params(),
-            ))
-        }
+        Some(unsafe { Self::Config::list_pop::<T>(self._to_write_params()) })
     }
 
     #[inline]
@@ -477,13 +431,7 @@ pub trait TypedListMut<'s, T: NBT>:
             return None;
         }
 
-        unsafe {
-            T::own_into_(Self::Config::list_remove_value(
-                T::TAG_ID,
-                self._to_write_params(),
-                index,
-            ))
-        }
+        Some(unsafe { Self::Config::list_remove::<T>(self._to_write_params(), index) })
     }
 
     fn iter<'a>(&'a self) -> <Self::Config as ConfigRef>::TypedListIter<'a, T>

@@ -109,20 +109,13 @@ impl<O: ByteOrder> ListOwn<O> {
         &'a mut self,
         index: usize,
     ) -> Option<T::TypeMut<'a, MutableConfig<O>>> {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        let tag_id = self.element_tag_id();
-        if !(tag_id == T::TAG_ID || (tag_id == TagID::End && self.is_empty())) {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
         unsafe {
-            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get(
-                T::TAG_ID,
+            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get_typed::<T>(
                 self._to_read_params(),
                 index,
             ))

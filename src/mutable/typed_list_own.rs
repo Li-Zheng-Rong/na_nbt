@@ -1,12 +1,10 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem, ptr};
 
 use crate::{
     ByteOrder, ConfigMut, ConfigRef, IntoNBT, NBT, TypedListBase, TypedListMut, TypedListRef,
     VecOwn, cold_path,
     mutable::{
-        config::MutableConfig,
-        size::{SIZE_DYN, drop_list_elements},
-        typed_list_mut::MutTypedList,
+        config::MutableConfig, size::SIZE_DYN, typed_list_mut::MutTypedList,
         typed_list_ref::RefTypedList,
     },
 };
@@ -76,11 +74,8 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
         }
 
         unsafe {
-            MutableConfig::<O>::read_mut::<T>(MutableConfig::<O>::list_get(
-                T::TAG_ID,
-                self._to_read_params(),
-                index,
-            ))
+            let params = MutableConfig::<O>::list_get_typed::<T>(self._to_read_params(), index);
+            Some(T::read_mut_nbt::<MutableConfig<O>>(params))
         }
     }
 
@@ -107,13 +102,18 @@ impl<O: ByteOrder, T: NBT> TypedListOwn<O, T> {
 
 impl<O: ByteOrder, T: NBT> Drop for TypedListOwn<O, T> {
     fn drop(&mut self) {
-        if T::TAG_ID.is_primitive() {
+        if const { !mem::needs_drop::<T::Type<O>>() } {
             return;
         }
         let len = self.len();
         unsafe {
+            debug_assert_eq!(mem::size_of::<T::Type<O>>(), SIZE_DYN);
+            debug_assert_eq!(mem::align_of::<T::Type<O>>(), 1);
             debug_assert_eq!(1 + 4 + len * SIZE_DYN, self.data.len());
-            drop_list_elements::<O>(T::TAG_ID, self.data.as_mut_ptr().add(5), len);
+            ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
+                self.data.as_mut_ptr().add(5).cast::<T::Type<O>>(),
+                len,
+            ));
         }
     }
 }

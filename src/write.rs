@@ -1,8 +1,8 @@
-use std::{any::TypeId, convert::Infallible, io::Write, mem::MaybeUninit, ptr, slice};
+use std::{convert::Infallible, io::Write, mem::MaybeUninit, ptr, slice};
 
 use zerocopy::byteorder;
 
-use crate::{ByteOrder, Error, MUTF8Str, Result, TagID, Writable};
+use crate::{ByteOrder, Error, MUTF8Str, Result, TagID, Writable, same_byte_order};
 
 #[inline(always)]
 pub(crate) fn swap_u16<O: ByteOrder, R: ByteOrder>(bytes: [u8; 2]) -> [u8; 2] {
@@ -363,7 +363,7 @@ fn write_endian_array_sink<O: ByteOrder, TARGET: ByteOrder, S: ByteSink, const N
     let mut hdr = [0u8; 7];
     hdr[0] = tag as u8;
     hdr[3..7].copy_from_slice(&byteorder::U32::<TARGET>::new(slice_ref.len() as u32).to_bytes());
-    if TypeId::of::<O>() == TypeId::of::<TARGET>() {
+    if const { same_byte_order::<O, TARGET>() } {
         let bytes = unsafe {
             slice::from_raw_parts(slice_ref.as_ptr().cast::<u8>(), slice_ref.len() * N)
         };

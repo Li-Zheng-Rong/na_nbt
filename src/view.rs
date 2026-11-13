@@ -771,6 +771,18 @@ impl<'a, T> VecMut<'a, T> {
         }
     }
 
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(data: *mut u8) -> Self {
+        let size = core::mem::size_of::<usize>();
+        unsafe {
+            Self::new(
+                &mut *data.cast(),
+                &mut *data.add(size).cast(),
+                &mut *data.add(size * 2).cast(),
+            )
+        }
+    }
+
     #[inline]
     pub unsafe fn new_clone(&mut self) -> Self {
         VecMut {
@@ -889,6 +901,18 @@ impl<'a> StringMut<'a> {
     ) -> Self {
         debug_assert!(len.get() <= cap.get());
         Self { ptr, len, cap }
+    }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(data: *mut u8) -> Self {
+        let size = core::mem::size_of::<usize>();
+        unsafe {
+            Self::new(
+                &mut *data.cast(),
+                &mut *data.add(size).cast(),
+                &mut *data.add(size * 2).cast(),
+            )
+        }
     }
 
     #[inline]

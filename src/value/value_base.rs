@@ -11,9 +11,11 @@
 
 use std::io::Write;
 
+use zerocopy::byteorder;
+
 use crate::{
-    ByteOrder, ConfigRef, ListMut, ListRef, MapMut, MapRef, NBT, NBTBase, Result, TagID, ValueMut,
-    ValueOwn, ValueRef, VisitMut, VisitMutShared, VisitRef,
+    ByteOrder, ConfigMut, ConfigRef, ListMut, ListRef, MapMut, MapRef, NBT, NBTBase, Result,
+    StringMut, TagID, ValueMut, ValueRef, VecMut, VisitMut, VisitMutShared, VisitRef, cold_path,
     tag::{
         Byte, ByteArray, Compound, Double, End, Float, Int, IntArray, List, Long, LongArray, Short,
         String, TypedList,
@@ -96,15 +98,28 @@ pub trait NBTInto: NBTBase {
 
     fn mut_into_<'s, V: ValueMut<'s>>(value: V) -> Option<Self::TypeMut<'s, V::Config>>;
 
-    fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>>;
+    unsafe fn read_static<'a, 'doc, C: ConfigRef>(
+        params: C::ReadParams<'a>,
+    ) -> Option<Self::TypeRef<'doc, C>>;
 
-    #[inline]
-    unsafe fn can_take_list_elem<'a, C: ConfigRef>(
-        _params: C::ReadParams<'a>,
-        _index: usize,
-    ) -> bool {
-        true
-    }
+    unsafe fn read_mut_static<'a, 'doc, C: ConfigMut>(
+        params: C::ReadParams<'a>,
+    ) -> Option<Self::TypeMut<'doc, C>>;
+
+    unsafe fn list_get_static<'a, C: ConfigRef>(
+        params: C::ReadParams<'a>,
+        index: usize,
+    ) -> C::ReadParams<'a>;
+
+    unsafe fn list_pop_static<'s, L: ListMut<'s>>(
+        list: &mut L,
+        len: usize,
+    ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>>;
+
+    unsafe fn list_remove_static<'s, L: ListMut<'s>>(
+        list: &mut L,
+        index: usize,
+    ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>>;
 }
 
 pub trait NBTRef: NBTBase {
@@ -117,10 +132,24 @@ pub trait NBTRef: NBTBase {
     fn mut_shared_<'a, 's: 'a, V: ValueMut<'s>>(
         value: &'a V,
     ) -> Option<&'a Self::TypeMut<'s, V::Config>>;
+
+    unsafe fn read_advance_nbt<'a, 'doc, C: ConfigRef>(
+        params: &mut C::ReadParams<'a>,
+    ) -> Self::TypeRef<'doc, C>;
+
+    unsafe fn read_mut_nbt<'a, 'doc, C: ConfigMut>(
+        params: C::ReadParams<'a>,
+    ) -> Self::TypeMut<'doc, C>;
 }
 
 macro_rules! impl_value_ref_dispatch {
-    ($($t:ident),*) => {
+    ($(
+        $t:ident => {
+            read($c_read:ident, $p_read:ident): $read_expr:expr,
+            read_mut($c_mut:ident, $p_mut:ident): $read_mut_expr:expr,
+            list_get($c_get:ident, $p_get:ident, $idx:ident): $list_get_expr:expr,
+        }
+    ),* $(,)?) => {
         $(
             impl NBTInto for $t {
                 #[inline]
@@ -140,17 +169,48 @@ macro_rules! impl_value_ref_dispatch {
                 }
 
                 #[inline]
-                fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>> {
-                    match value {
-                        ValueOwn::$t(v) => Some(v),
-                        _ => None,
-                    }
+                unsafe fn read_static<'a, 'doc, C: ConfigRef>(
+                    mut params: C::ReadParams<'a>,
+                ) -> Option<Self::TypeRef<'doc, C>> {
+                    Some(unsafe { Self::read_advance_nbt::<C>(&mut params) })
+                }
+
+                #[inline]
+                unsafe fn read_mut_static<'a, 'doc, C: ConfigMut>(
+                    params: C::ReadParams<'a>,
+                ) -> Option<Self::TypeMut<'doc, C>> {
+                    Some(unsafe { Self::read_mut_nbt::<C>(params) })
+                }
+
+                #[inline]
+                unsafe fn list_get_static<'a, $c_get: ConfigRef>(
+                    $p_get: $c_get::ReadParams<'a>,
+                    $idx: usize,
+                ) -> $c_get::ReadParams<'a> {
+                    #[allow(unused_unsafe)]
+                    unsafe { $list_get_expr }
+                }
+
+                #[inline]
+                unsafe fn list_pop_static<'s, L: ListMut<'s>>(
+                    list: &mut L,
+                    _len: usize,
+                ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>> {
+                    Some(unsafe { L::Config::list_pop::<Self>(list._to_write_params()) })
+                }
+
+                #[inline]
+                unsafe fn list_remove_static<'s, L: ListMut<'s>>(
+                    list: &mut L,
+                    index: usize,
+                ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>> {
+                    Some(unsafe { L::Config::list_remove::<Self>(list._to_write_params(), index) })
                 }
             }
 
             impl NBTRef for $t {
                 #[inline]
-                fn ref_<'a, 's: 'a, V:ValueRef<'s>>(value: &'a V) -> Option<&'a Self::TypeRef<'s, V::Config>> {
+                fn ref_<'a, 's: 'a, V: ValueRef<'s>>(value: &'a V) -> Option<&'a Self::TypeRef<'s, V::Config>> {
                     value.visit(|value| match value {
                         VisitRef::$t(v) => Some(v),
                         _ => None,
@@ -172,15 +232,104 @@ macro_rules! impl_value_ref_dispatch {
                         _ => None,
                     })
                 }
+
+                #[inline]
+                unsafe fn read_advance_nbt<'a, 'doc, $c_read: ConfigRef>(
+                    $p_read: &mut $c_read::ReadParams<'a>,
+                ) -> Self::TypeRef<'doc, $c_read> {
+                    #[allow(unused_unsafe)]
+                    unsafe { $read_expr }
+                }
+
+                #[inline]
+                unsafe fn read_mut_nbt<'a, 'doc, $c_mut: ConfigMut>(
+                    $p_mut: $c_mut::ReadParams<'a>,
+                ) -> Self::TypeMut<'doc, $c_mut> {
+                    #[allow(unused_unsafe)]
+                    unsafe { $read_mut_expr }
+                }
             }
         )*
     };
 }
 
-impl_value_ref_dispatch!(
-    End, Byte, Short, Int, Long, Float, Double, ByteArray, String, List, Compound, IntArray,
-    LongArray
-);
+impl_value_ref_dispatch! {
+    End => {
+        read(C, _params): (),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, _index): params,
+    },
+    Byte => {
+        read(C, params): *C::read_primitive_advance(params, 1).cast(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 1),
+    },
+    Short => {
+        read(C, params): byteorder::I16::<C::ByteOrder>::from_bytes(
+            *C::read_primitive_advance(params, 2).cast()
+        ).get(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 2),
+    },
+    Int => {
+        read(C, params): byteorder::I32::<C::ByteOrder>::from_bytes(
+            *C::read_primitive_advance(params, 4).cast()
+        ).get(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 4),
+    },
+    Long => {
+        read(C, params): byteorder::I64::<C::ByteOrder>::from_bytes(
+            *C::read_primitive_advance(params, 8).cast()
+        ).get(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 8),
+    },
+    Float => {
+        read(C, params): byteorder::F32::<C::ByteOrder>::from_bytes(
+            *C::read_primitive_advance(params, 4).cast()
+        ).get(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 4),
+    },
+    Double => {
+        read(C, params): byteorder::F64::<C::ByteOrder>::from_bytes(
+            *C::read_primitive_advance(params, 8).cast()
+        ).get(),
+        read_mut(C, params): &mut *C::read_ptr(&params).cast_mut().cast(),
+        list_get(C, params, index): C::list_get_primitive(params, index, 8),
+    },
+    ByteArray => {
+        read(C, params): C::read_byte_array_advance(params),
+        read_mut(C, params): VecMut::from_raw(C::read_ptr(&params).cast_mut()),
+        list_get(C, params, index): C::list_get_array(params, index, 1),
+    },
+    String => {
+        read(C, params): C::read_string_advance(params),
+        read_mut(C, params): StringMut::from_raw(C::read_ptr(&params).cast_mut()),
+        list_get(C, params, index): C::list_get_string(params, index),
+    },
+    List => {
+        read(C, params): C::read_list_advance(params),
+        read_mut(C, params): C::read_list_mut(params),
+        list_get(C, params, index): C::list_get_composite(params, index),
+    },
+    Compound => {
+        read(C, params): C::read_compound_advance(params),
+        read_mut(C, params): C::read_compound_mut(params),
+        list_get(C, params, index): C::list_get_composite(params, index),
+    },
+    IntArray => {
+        read(C, params): C::read_int_array_advance(params),
+        read_mut(C, params): VecMut::from_raw(C::read_ptr(&params).cast_mut()),
+        list_get(C, params, index): C::list_get_array(params, index, 4),
+    },
+    LongArray => {
+        read(C, params): C::read_long_array_advance(params),
+        read_mut(C, params): VecMut::from_raw(C::read_ptr(&params).cast_mut()),
+        list_get(C, params, index): C::list_get_array(params, index, 8),
+    },
+}
 
 impl<T: NBT> NBTInto for TypedList<T> {
     #[inline]
@@ -200,21 +349,61 @@ impl<T: NBT> NBTInto for TypedList<T> {
     }
 
     #[inline]
-    fn own_into_<O: ByteOrder>(value: ValueOwn<O>) -> Option<Self::Type<O>> {
-        match value {
-            ValueOwn::List(v) => v.typed_::<T>(),
-            _ => None,
+    unsafe fn read_static<'a, 'doc, C: ConfigRef>(
+        mut params: C::ReadParams<'a>,
+    ) -> Option<Self::TypeRef<'doc, C>> {
+        unsafe { C::read_list_advance(&mut params) }.typed_::<T>()
+    }
+
+    #[inline]
+    unsafe fn read_mut_static<'a, 'doc, C: ConfigMut>(
+        params: C::ReadParams<'a>,
+    ) -> Option<Self::TypeMut<'doc, C>> {
+        unsafe { C::read_list_mut(params) }.typed_::<T>()
+    }
+
+    #[inline]
+    unsafe fn list_get_static<'a, C: ConfigRef>(
+        params: C::ReadParams<'a>,
+        index: usize,
+    ) -> C::ReadParams<'a> {
+        unsafe { C::list_get_composite(params, index) }
+    }
+
+    #[inline]
+    unsafe fn list_pop_static<'s, L: ListMut<'s>>(
+        list: &mut L,
+        len: usize,
+    ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>> {
+        unsafe {
+            let elem_ok = {
+                let mut elem_params =
+                    L::Config::list_get_composite(list._to_read_params(), len - 1);
+                L::Config::read_list_advance(&mut elem_params).element_is_::<T>()
+            };
+            if !elem_ok {
+                cold_path();
+                return None;
+            }
+            L::Config::list_pop::<List>(list._to_write_params()).typed_::<T>()
         }
     }
 
     #[inline]
-    unsafe fn can_take_list_elem<'a, C: ConfigRef>(
-        params: C::ReadParams<'a>,
+    unsafe fn list_remove_static<'s, L: ListMut<'s>>(
+        list: &mut L,
         index: usize,
-    ) -> bool {
+    ) -> Option<Self::Type<<L::Config as ConfigRef>::ByteOrder>> {
         unsafe {
-            let elem_params = C::list_get(TagID::List, params, index);
-            C::read::<List>(elem_params).is_some_and(|list| list.element_is_::<T>())
+            let elem_ok = {
+                let mut elem_params = L::Config::list_get_composite(list._to_read_params(), index);
+                L::Config::read_list_advance(&mut elem_params).element_is_::<T>()
+            };
+            if !elem_ok {
+                cold_path();
+                return None;
+            }
+            L::Config::list_remove::<List>(list._to_write_params(), index).typed_::<T>()
         }
     }
 }

@@ -152,6 +152,15 @@ pub trait ByteOrder: zerocopy::ByteOrder + Send + Sync + 'static {}
 
 impl<T: zerocopy::ByteOrder + Send + Sync + 'static> ByteOrder for T {}
 
+#[inline(always)]
+pub(crate) const fn same_byte_order<A: ByteOrder, B: ByteOrder>() -> bool {
+    matches!(
+        (A::ORDER, B::ORDER),
+        (zerocopy::Order::BigEndian, zerocopy::Order::BigEndian)
+            | (zerocopy::Order::LittleEndian, zerocopy::Order::LittleEndian)
+    )
+}
+
 pub(crate) static EMPTY_LIST: [u8; 5] = [0; 5];
 pub(crate) static EMPTY_COMPOUND: [u8; 1] = [0];
 

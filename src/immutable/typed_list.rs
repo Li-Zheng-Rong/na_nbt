@@ -4,9 +4,7 @@ use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef,
-    immutable::{
-        config::ImmutableConfig, document::Document, mark::Mark, size::immutable_tag_size,
-    },
+    immutable::{config::ImmutableConfig, document::Document, mark::Mark},
 };
 
 #[derive(Clone)]
@@ -122,17 +120,11 @@ impl<'doc, O: ByteOrder, D: Document, T: NBT> Iterator for ReadonlyTypedListIter
 
         self.remaining -= 1;
 
-        unsafe {
-            let cur_data = self.data;
-            let cur_mark = self.mark;
-            let (data_advance, mark_advance) = immutable_tag_size::<O>(T::TAG_ID, cur_data, cur_mark);
-            self.data = cur_data.add(data_advance);
-            self.mark = cur_mark.add(mark_advance);
-            Some(
-                ImmutableConfig::<O, D>::read::<T>((cur_data, cur_mark, &self.doc))
-                    .unwrap_unchecked(),
-            )
-        }
+        let mut params = (self.data, self.mark, &self.doc);
+        let item = unsafe { T::read_advance_nbt::<ImmutableConfig<O, D>>(&mut params) };
+        self.data = params.0;
+        self.mark = params.1;
+        Some(item)
     }
 
     #[inline]
@@ -140,19 +132,10 @@ impl<'doc, O: ByteOrder, D: Document, T: NBT> Iterator for ReadonlyTypedListIter
     where
         F: FnMut(B, Self::Item) -> B,
     {
-        let mut cur_data = self.data;
-        let mut cur_mark = self.mark;
-        let doc = &self.doc;
-        unsafe {
-            for _ in 0..self.remaining {
-                let (data_advance, mark_advance) =
-                    immutable_tag_size::<O>(T::TAG_ID, cur_data, cur_mark);
-                let item = ImmutableConfig::<O, D>::read::<T>((cur_data, cur_mark, doc))
-                    .unwrap_unchecked();
-                cur_data = cur_data.add(data_advance);
-                cur_mark = cur_mark.add(mark_advance);
-                accum = f(accum, item);
-            }
+        let mut params = (self.data, self.mark, &self.doc);
+        for _ in 0..self.remaining {
+            let item = unsafe { T::read_advance_nbt::<ImmutableConfig<O, D>>(&mut params) };
+            accum = f(accum, item);
         }
         accum
     }

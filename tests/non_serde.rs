@@ -443,4 +443,126 @@ fn test_typed_list_dispatch_and_mutation_safety() {
         assert_eq!(i.get(0), Some(7));
         assert!(mv.is_empty());
     }
+
+    // Exercise static dispatch across all tag families (primitives, arrays, strings, lists, compounds)
+    // in borrowed ref, owned ref, and owned mut modes (including TypedListOwn Drop on heap tags).
+    let mut comp = CompoundOwn::<BigEndian>::default();
+    let mut tl_byte = TypedListOwn::<BigEndian, tag::Byte>::default();
+    tl_byte.push(1i8);
+    tl_byte.push(2i8);
+    tl_byte.push(3i8);
+    comp.insert("tl_byte", tl_byte);
+
+    let mut tl_short = TypedListOwn::<BigEndian, tag::Short>::default();
+    tl_short.push(100i16);
+    tl_short.push(200i16);
+    comp.insert("tl_short", tl_short);
+
+    let mut tl_long = TypedListOwn::<BigEndian, tag::Long>::default();
+    tl_long.push(1000i64);
+    tl_long.push(2000i64);
+    comp.insert("tl_long", tl_long);
+
+    let mut tl_float = TypedListOwn::<BigEndian, tag::Float>::default();
+    tl_float.push(1.25f32);
+    tl_float.push(2.5f32);
+    comp.insert("tl_float", tl_float);
+
+    let mut tl_double = TypedListOwn::<BigEndian, tag::Double>::default();
+    tl_double.push(3.5f64);
+    tl_double.push(4.5f64);
+    comp.insert("tl_double", tl_double);
+
+    let mut tl_ba = TypedListOwn::<BigEndian, tag::ByteArray>::default();
+    tl_ba.push(vec![1i8, 2]);
+    tl_ba.push(vec![3i8, 4, 5]);
+    comp.insert("tl_ba", tl_ba);
+
+    let mut tl_ia = TypedListOwn::<BigEndian, tag::IntArray>::default();
+    tl_ia.push(vec![byteorder::I32::<BigEndian>::new(11), 22.into()]);
+    tl_ia.push(vec![byteorder::I32::<BigEndian>::new(33)]);
+    comp.insert("tl_ia", tl_ia);
+
+    let mut tl_la = TypedListOwn::<BigEndian, tag::LongArray>::default();
+    tl_la.push(vec![byteorder::I64::<BigEndian>::new(111)]);
+    tl_la.push(vec![byteorder::I64::<BigEndian>::new(222), 333.into()]);
+    comp.insert("tl_la", tl_la);
+
+    let mut tl_str = TypedListOwn::<BigEndian, tag::String>::default();
+    tl_str.push("first");
+    tl_str.push("second");
+    tl_str.push("third");
+    assert_eq!(tl_str.remove(1).unwrap().decode_lossy(), "second");
+    assert_eq!(tl_str.pop().unwrap().decode_lossy(), "third");
+    tl_str.push("second_new");
+    tl_str.get_mut(1).unwrap().push_str("!");
+    comp.insert("tl_str", tl_str);
+
+    // Drop non-empty TypedListOwn of heap elements directly
+    {
+        let mut drop_tl = TypedListOwn::<BigEndian, tag::Compound>::default();
+        let mut sub = CompoundOwn::<BigEndian>::default();
+        sub.insert("msg", "allocated_on_heap_and_dropped_statically");
+        drop_tl.push(sub);
+    }
+
+    let bytes = ValueOwn::Compound(comp).write_to_vec::<BigEndian>();
+    let bdoc = read_borrowed::<BigEndian>(&bytes).unwrap();
+    let broot = bdoc.root().into_::<tag::Compound>().unwrap();
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::Byte>>("tl_byte").unwrap().iter().sum::<i8>(),
+        6
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::Short>>("tl_short").unwrap().get(1),
+        Some(200)
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::Long>>("tl_long").unwrap().iter().sum::<i64>(),
+        3000
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::Float>>("tl_float").unwrap().get(1),
+        Some(2.5)
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::Double>>("tl_double").unwrap().get(1),
+        Some(4.5)
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::ByteArray>>("tl_ba").unwrap().get(1).unwrap().len(),
+        3
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::IntArray>>("tl_ia").unwrap().get(1).unwrap()[0].get(),
+        33
+    );
+    assert_eq!(
+        broot.get_::<tag::TypedList<tag::LongArray>>("tl_la").unwrap().get(1).unwrap()[1].get(),
+        333
+    );
+    let b_strs: Vec<String> = broot
+        .get_::<tag::TypedList<tag::String>>("tl_str")
+        .unwrap()
+        .iter()
+        .map(|s| s.to_utf8_string())
+        .collect();
+    assert_eq!(b_strs, vec!["first", "second_new!"]);
+
+    // Owned ref + mut static dispatch (including MutTypedListIter::fold and TypedListMut::pop/remove)
+    let mut own = read_owned::<BigEndian, BigEndian>(&bytes).unwrap();
+    {
+        use na_nbt::{CompoundMut, TypedListBase, TypedListMut};
+        let mut c_mut = own.to_mut().into_::<tag::Compound>().unwrap();
+        let mut s_list = c_mut.get_mut_::<tag::TypedList<tag::Short>>("tl_short").unwrap();
+        s_list.iter_mut().for_each(|x| x.set(x.get() + 1));
+        assert_eq!(s_list.get(0), Some(101));
+        assert_eq!(s_list.remove(0).unwrap().get(), 101);
+        assert_eq!(s_list.pop().unwrap().get(), 201);
+        assert!(s_list.is_empty());
+
+        let mut ba_list = c_mut.get_mut_::<tag::TypedList<tag::ByteArray>>("tl_ba").unwrap();
+        ba_list.get_mut(1).unwrap().push(6);
+        assert_eq!(ba_list.get(1).unwrap().len(), 4);
+    }
 }

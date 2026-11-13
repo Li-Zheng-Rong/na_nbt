@@ -109,11 +109,24 @@ impl<'s, O: ByteOrder, T: NBT> Iterator for MutTypedListIter<'s, O, T> {
 
         self.remaining -= 1;
 
-        let value = unsafe { MutableConfig::<O>::read_mut::<T>(self.data) };
+        let cur = self.data;
+        self.data = unsafe { cur.add(const { mutable_tag_size(T::TAG_ID) }) };
+        Some(unsafe { T::read_mut_nbt::<MutableConfig<O>>(cur) })
+    }
 
-        self.data = unsafe { self.data.add(mutable_tag_size(T::TAG_ID)) };
-
-        value
+    #[inline]
+    fn fold<B, F>(self, mut accum: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut cur = self.data;
+        let step = const { mutable_tag_size(T::TAG_ID) };
+        for _ in 0..self.remaining {
+            let item = unsafe { T::read_mut_nbt::<MutableConfig<O>>(cur) };
+            cur = unsafe { cur.add(step) };
+            accum = f(accum, item);
+        }
+        accum
     }
 
     #[inline]

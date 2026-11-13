@@ -14,8 +14,8 @@
 //! - [`CompoundRef`] - Read-only access to NBT compounds
 
 use crate::{
-    CompoundBase, ConfigRef, GenericNBT, ListBase, MapRef, NBT, TagID, TypedListBase, ValueBase,
-    VisitRef, cold_path,
+    CompoundBase, ConfigRef, GenericNBT, ListBase, MapRef, NBT, TypedListBase, ValueBase, VisitRef,
+    cold_path,
     index::Index,
     tag::{Compound, List},
     with_mutf8_key,
@@ -111,21 +111,13 @@ pub trait ListRef<'s>:
 
     #[inline]
     fn get_<T: GenericNBT>(&self, index: usize) -> Option<T::TypeRef<'s, Self::Config>> {
-        if index >= self.len() {
-            cold_path();
-            return None;
-        }
-
-        if !(self.element_tag_id() == T::TAG_ID
-            || (self.element_tag_id() == TagID::End && self.is_empty()))
-        {
+        if index >= self.len() || self.element_tag_id() != T::TAG_ID {
             cold_path();
             return None;
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get(
-                T::TAG_ID,
+            Self::Config::read::<T>(Self::Config::list_get_typed::<T>(
                 self._to_read_params(),
                 index,
             ))
@@ -169,11 +161,8 @@ pub trait TypedListRef<'s, T: NBT>:
         }
 
         unsafe {
-            Self::Config::read::<T>(Self::Config::list_get(
-                T::TAG_ID,
-                self._to_read_params(),
-                index,
-            ))
+            let mut params = Self::Config::list_get_typed::<T>(self._to_read_params(), index);
+            Some(T::read_advance_nbt::<Self::Config>(&mut params))
         }
     }
 

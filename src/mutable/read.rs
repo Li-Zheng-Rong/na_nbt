@@ -1,5 +1,4 @@
 use std::{
-    any::TypeId,
     hint::assert_unchecked,
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
@@ -12,6 +11,7 @@ use crate::{
     ByteOrder, CompoundOwn, Error, ListOwn, Result, StringOwn, TagID, ValueOwn, VecOwn, cold_path,
     immutable::size::tag_elem_size,
     mutable::size::{SIZE_DYN, drop_compound_entries, drop_list_elements},
+    same_byte_order,
     write::{swap_u16, swap_u32, swap_u64},
 };
 
@@ -156,7 +156,7 @@ unsafe fn read_i32_vec_own<O: ByteOrder, R: ByteOrder>(
     src: *const u8,
     len: usize,
 ) -> VecOwn<byteorder::I32<R>> {
-    if TypeId::of::<O>() == TypeId::of::<R>() {
+    if const { same_byte_order::<O, R>() } {
         return unsafe { slice::from_raw_parts(src.cast::<byteorder::I32<R>>(), len) }.into();
     }
     let mut out = Vec::<byteorder::I32<R>>::with_capacity(len);
@@ -177,7 +177,7 @@ unsafe fn read_i64_vec_own<O: ByteOrder, R: ByteOrder>(
     src: *const u8,
     len: usize,
 ) -> VecOwn<byteorder::I64<R>> {
-    if TypeId::of::<O>() == TypeId::of::<R>() {
+    if const { same_byte_order::<O, R>() } {
         return unsafe { slice::from_raw_parts(src.cast::<byteorder::I64<R>>(), len) }.into();
     }
     let mut out = Vec::<byteorder::I64<R>>::with_capacity(len);
@@ -195,7 +195,7 @@ unsafe fn read_compound<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<CompoundOwn<R>> {
-    let same_order = TypeId::of::<O>() == TypeId::of::<R>();
+    let same_order = const { same_byte_order::<O, R>() };
     let mut guard = CompoundBuildGuard::<R>::with_capacity(128);
 
     unsafe {
@@ -329,7 +329,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
 ) -> Result<ListOwn<R>> {
-    let same_order = TypeId::of::<O>() == TypeId::of::<R>();
+    let same_order = const { same_byte_order::<O, R>() };
     unsafe {
         let list_start = *current_pos;
         let rem = (end_pos as usize) - (list_start as usize);

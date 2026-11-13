@@ -1,4 +1,4 @@
-use std::{any::TypeId, hint::unreachable_unchecked, io::Write, ptr, slice};
+use std::{hint::unreachable_unchecked, io::Write, ptr, slice};
 
 use zerocopy::byteorder;
 
@@ -17,6 +17,7 @@ use crate::{
         value_mut::MutValue,
         value_ref::RefValue,
     },
+    same_byte_order,
     write::{
         ByteSink, IoSink, impl_writable_delegate, impl_writable_value_enum, sink_to_vec, swap_u16,
         swap_u32, swap_u64,
@@ -41,7 +42,7 @@ unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
     mut data: *const u8,
     sink: &mut S,
 ) -> core::result::Result<(), S::Error> {
-    let same_order = TypeId::of::<O>() == TypeId::of::<R>();
+    let same_order = const { same_byte_order::<O, R>() };
     sink.reserve(128);
     unsafe {
         let mut start = data;
@@ -167,7 +168,7 @@ unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
     mut data: *const u8,
     sink: &mut S,
 ) -> core::result::Result<(), S::Error> {
-    let same_order = TypeId::of::<O>() == TypeId::of::<R>();
+    let same_order = const { same_byte_order::<O, R>() };
     unsafe {
         let tag_id = TagID::from_u8_unchecked(*data);
         let len = byteorder::U32::<O>::from_bytes(*data.add(1).cast()).get() as usize;

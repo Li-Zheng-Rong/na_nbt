@@ -17,6 +17,10 @@ pub trait ConfigMut: ConfigRef {
 
     type WriteParams<'a>: Sized;
 
+    unsafe fn read_list_mut<'a, 'doc>(params: Self::ReadParams<'a>) -> Self::ListMut<'doc>;
+
+    unsafe fn read_compound_mut<'a, 'doc>(params: Self::ReadParams<'a>) -> Self::CompoundMut<'doc>;
+
     unsafe fn read_value_mut<'a, 'doc>(
         tag_id: TagID,
         params: Self::ReadParams<'a>,
@@ -26,10 +30,12 @@ pub trait ConfigMut: ConfigRef {
     unsafe fn read_mut<'a, 'doc, T: GenericNBT>(
         params: Self::ReadParams<'a>,
     ) -> Option<T::TypeMut<'doc, Self>> {
-        T::mut_into_(unsafe { Self::read_value_mut(T::TAG_ID, params) })
+        unsafe { T::read_mut_static::<Self>(params) }
     }
 
     unsafe fn list_push<'a, T: NBT>(params: Self::WriteParams<'a>, value: T::Type<Self::ByteOrder>);
+
+    unsafe fn list_pop<'a, T: NBT>(params: Self::WriteParams<'a>) -> T::Type<Self::ByteOrder>;
 
     unsafe fn list_pop_value<'a>(
         tag_id: TagID,
@@ -41,6 +47,11 @@ pub trait ConfigMut: ConfigRef {
         index: usize,
         value: T::Type<Self::ByteOrder>,
     );
+
+    unsafe fn list_remove<'a, T: NBT>(
+        params: Self::WriteParams<'a>,
+        index: usize,
+    ) -> T::Type<Self::ByteOrder>;
 
     unsafe fn list_remove_value<'a>(
         tag_id: TagID,

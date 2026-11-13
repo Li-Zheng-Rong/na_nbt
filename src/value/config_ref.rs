@@ -25,7 +25,66 @@ pub trait ConfigRef: Send + Sync + Sized + Clone + 'static {
     type IntArray<'doc>: Deref<Target = [byteorder::I32<Self::ByteOrder>]> + Clone + Default;
     type LongArray<'doc>: Deref<Target = [byteorder::I64<Self::ByteOrder>]> + Clone + Default;
 
-    type ReadParams<'a>: Sized;
+    type ReadParams<'a>: Copy;
+
+    fn read_ptr<'a>(params: &Self::ReadParams<'a>) -> *const u8;
+
+    unsafe fn read_primitive_advance<'a>(
+        params: &mut Self::ReadParams<'a>,
+        size: usize,
+    ) -> *const u8;
+
+    unsafe fn read_byte_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::ByteArray<'doc>;
+
+    unsafe fn read_string_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::String<'doc>;
+
+    unsafe fn read_list_advance<'a, 'doc>(params: &mut Self::ReadParams<'a>) -> Self::List<'doc>;
+
+    unsafe fn read_compound_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::Compound<'doc>;
+
+    unsafe fn read_int_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::IntArray<'doc>;
+
+    unsafe fn read_long_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::LongArray<'doc>;
+
+    unsafe fn list_get_primitive<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+        elem_size: usize,
+    ) -> Self::ReadParams<'a>;
+
+    unsafe fn list_get_array<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+        elem_size: usize,
+    ) -> Self::ReadParams<'a>;
+
+    unsafe fn list_get_string<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+    ) -> Self::ReadParams<'a>;
+
+    unsafe fn list_get_composite<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+    ) -> Self::ReadParams<'a>;
+
+    #[inline]
+    unsafe fn list_get_typed<'a, T: GenericNBT>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+    ) -> Self::ReadParams<'a> {
+        unsafe { T::list_get_static::<Self>(params, index) }
+    }
 
     unsafe fn list_get<'a, 'doc>(
         tag_id: TagID,
@@ -51,6 +110,6 @@ pub trait ConfigRef: Send + Sync + Sized + Clone + 'static {
     unsafe fn read<'a, 'doc, T: GenericNBT>(
         params: Self::ReadParams<'a>,
     ) -> Option<T::TypeRef<'doc, Self>> {
-        T::ref_into_(unsafe { Self::read_value(T::TAG_ID, params) })
+        unsafe { T::read_static::<Self>(params) }
     }
 }

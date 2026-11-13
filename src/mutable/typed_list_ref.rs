@@ -4,7 +4,7 @@ use zerocopy::byteorder;
 
 use crate::{
     ByteOrder, ConfigRef, EMPTY_LIST, NBT, TypedListBase, TypedListRef,
-    mutable::{config::MutableConfig, size::mutable_tag_size},
+    mutable::config::MutableConfig,
 };
 
 #[derive(Clone)]
@@ -101,11 +101,7 @@ impl<'s, O: ByteOrder, T: NBT> Iterator for RefTypedListIter<'s, O, T> {
 
         self.remaining -= 1;
 
-        unsafe {
-            let cur_data = self.data;
-            self.data = cur_data.add(mutable_tag_size(T::TAG_ID));
-            Some(MutableConfig::<O>::read::<T>(cur_data).unwrap_unchecked())
-        }
+        Some(unsafe { T::read_advance_nbt::<MutableConfig<O>>(&mut self.data) })
     }
 
     #[inline]
@@ -114,13 +110,9 @@ impl<'s, O: ByteOrder, T: NBT> Iterator for RefTypedListIter<'s, O, T> {
         F: FnMut(B, Self::Item) -> B,
     {
         let mut cur_data = self.data;
-        let step = mutable_tag_size(T::TAG_ID);
-        unsafe {
-            for _ in 0..self.remaining {
-                let item = MutableConfig::<O>::read::<T>(cur_data).unwrap_unchecked();
-                cur_data = cur_data.add(step);
-                accum = f(accum, item);
-            }
+        for _ in 0..self.remaining {
+            let item = unsafe { T::read_advance_nbt::<MutableConfig<O>>(&mut cur_data) };
+            accum = f(accum, item);
         }
         accum
     }

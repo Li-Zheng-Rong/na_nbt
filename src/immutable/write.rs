@@ -1,4 +1,4 @@
-use std::{any::TypeId, hint::unreachable_unchecked, io::Write, slice};
+use std::{hint::unreachable_unchecked, io::Write, slice};
 
 use zerocopy::byteorder;
 
@@ -8,6 +8,7 @@ use crate::{
         array::ReadonlyArray, compound::ReadonlyCompound, document::Document, list::ReadonlyList,
         string::ReadonlyString, typed_list::ReadonlyTypedList, value::ReadonlyValue,
     },
+    same_byte_order,
     write::{
         ByteSink, IoSink, impl_writable_delegate, impl_writable_value_enum, sink_to_vec, swap_u16,
         swap_u32, swap_u64,
@@ -221,7 +222,7 @@ macro_rules! impl_writable_readonly_composite {
             fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
                 let hdr = [TagID::$tag as u8, 0, 0];
                 sink_to_vec(3 + self.data.len(), |out| {
-                    if TypeId::of::<SOURCE>() == TypeId::of::<TARGET>() {
+                    if const { same_byte_order::<SOURCE, TARGET>() } {
                         out.write_2(&hdr, self.data)
                     } else {
                         out.write_bytes(&hdr)?;
@@ -236,7 +237,7 @@ macro_rules! impl_writable_readonly_composite {
             fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
                 let hdr = [TagID::$tag as u8, 0, 0];
                 let mut sink = IoSink(writer);
-                if TypeId::of::<SOURCE>() == TypeId::of::<TARGET>() {
+                if const { same_byte_order::<SOURCE, TARGET>() } {
                     sink.write_2(&hdr, self.data)
                 } else {
                     sink.write_bytes(&hdr)?;

@@ -3,19 +3,20 @@ use std::{marker::PhantomData, ptr, slice};
 use zerocopy::byteorder;
 
 use crate::{
-    ByteOrder, ConfigMut, ConfigRef, MUTF8Str, NBT, StringMut, TagID, ValueOwn, VecMut, cold_path,
+    ByteOrder, ConfigMut, ConfigRef, MUTF8Str, NBT, NBTRef, TagID, ValueOwn, VecMut, cold_path,
     mutable::{
         compound_mut::{MutCompound, MutCompoundIter},
         compound_ref::{RefCompound, RefCompoundIter},
         list_mut::{MutList, MutListIter},
         list_ref::{RefList, RefListIter, read_ref_and_advance},
-        size::{SIZE_USIZE, mutable_tag_size},
+        size::{SIZE_DYN, SIZE_USIZE, mutable_tag_size},
         string_ref::RefString,
         typed_list_mut::{MutTypedList, MutTypedListIter},
         typed_list_ref::{RefTypedList, RefTypedListIter},
         value_mut::MutValue,
         value_ref::RefValue,
     },
+    tag,
 };
 
 unsafe fn list_decrease<O: ByteOrder>(data: &mut VecMut<'_, u8>) {
@@ -60,6 +61,139 @@ impl<O: ByteOrder> ConfigRef for MutableConfig<O> {
     type LongArray<'doc> = &'doc [byteorder::I64<O>];
 
     type ReadParams<'a> = *const u8;
+
+    #[inline(always)]
+    fn read_ptr<'a>(params: &Self::ReadParams<'a>) -> *const u8 {
+        *params
+    }
+
+    #[inline(always)]
+    unsafe fn read_primitive_advance<'a>(
+        params: &mut Self::ReadParams<'a>,
+        size: usize,
+    ) -> *const u8 {
+        let ptr = *params;
+        *params = unsafe { ptr.add(size) };
+        ptr
+    }
+
+    #[inline(always)]
+    unsafe fn read_byte_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::ByteArray<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const i8 = ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            let len = usize::from_ne_bytes(*ptr.add(SIZE_USIZE).cast());
+            *params = ptr.add(SIZE_DYN);
+            slice::from_raw_parts(p, len)
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_string_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::String<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const u8 = ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            let len = usize::from_ne_bytes(*ptr.add(SIZE_USIZE).cast());
+            *params = ptr.add(SIZE_DYN);
+            RefString {
+                data: MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(p, len)),
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_list_advance<'a, 'doc>(params: &mut Self::ReadParams<'a>) -> Self::List<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const u8 = ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            *params = ptr.add(SIZE_DYN);
+            RefList {
+                data: p,
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_compound_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::Compound<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const u8 = ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            *params = ptr.add(SIZE_DYN);
+            RefCompound {
+                data: p,
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_int_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::IntArray<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const byteorder::I32<O> =
+                ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            let len = usize::from_ne_bytes(*ptr.add(SIZE_USIZE).cast());
+            *params = ptr.add(SIZE_DYN);
+            slice::from_raw_parts(p, len)
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_long_array_advance<'a, 'doc>(
+        params: &mut Self::ReadParams<'a>,
+    ) -> Self::LongArray<'doc> {
+        unsafe {
+            let ptr = *params;
+            let p: *const byteorder::I64<O> =
+                ptr::with_exposed_provenance(usize::from_ne_bytes(*ptr.cast()));
+            let len = usize::from_ne_bytes(*ptr.add(SIZE_USIZE).cast());
+            *params = ptr.add(SIZE_DYN);
+            slice::from_raw_parts(p, len)
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn list_get_primitive<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+        elem_size: usize,
+    ) -> Self::ReadParams<'a> {
+        unsafe { params.add(index * elem_size) }
+    }
+
+    #[inline(always)]
+    unsafe fn list_get_array<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+        _elem_size: usize,
+    ) -> Self::ReadParams<'a> {
+        unsafe { params.add(index * SIZE_DYN) }
+    }
+
+    #[inline(always)]
+    unsafe fn list_get_string<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+    ) -> Self::ReadParams<'a> {
+        unsafe { params.add(index * SIZE_DYN) }
+    }
+
+    #[inline(always)]
+    unsafe fn list_get_composite<'a>(
+        params: Self::ReadParams<'a>,
+        index: usize,
+    ) -> Self::ReadParams<'a> {
+        unsafe { params.add(index * SIZE_DYN) }
+    }
 
     #[inline]
     unsafe fn list_get<'a, 'doc>(
@@ -129,50 +263,40 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
 
     type WriteParams<'a> = VecMut<'a, u8>;
 
+    #[inline(always)]
+    unsafe fn read_list_mut<'a, 'doc>(params: Self::ReadParams<'a>) -> Self::ListMut<'doc> {
+        MutList {
+            data: unsafe { VecMut::from_raw(params.cast_mut()) },
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_compound_mut<'a, 'doc>(params: Self::ReadParams<'a>) -> Self::CompoundMut<'doc> {
+        MutCompound {
+            data: unsafe { VecMut::from_raw(params.cast_mut()) },
+            _marker: PhantomData,
+        }
+    }
+
     #[inline]
     unsafe fn read_value_mut<'a, 'doc>(
         tag_id: TagID,
         params: Self::ReadParams<'a>,
     ) -> Self::ValueMut<'doc> {
-        #[inline(always)]
-        unsafe fn vec_mut<'doc, E>(data: *mut u8) -> VecMut<'doc, E> {
-            unsafe {
-                VecMut::new(
-                    &mut *data.cast(),
-                    &mut *data.add(SIZE_USIZE).cast(),
-                    &mut *data.add(SIZE_USIZE * 2).cast(),
-                )
-            }
+        macro_rules! dispatch {
+            ($($t:ident),* $(,)?) => {
+                match tag_id {
+                    $(TagID::$t => MutValue::$t(unsafe {
+                        <tag::$t as NBTRef>::read_mut_nbt::<Self>(params)
+                    }),)*
+                }
+            };
         }
-
-        unsafe {
-            let data = params.cast_mut();
-            match tag_id {
-                TagID::End => MutValue::End(&mut *data.cast()),
-                TagID::Byte => MutValue::Byte(&mut *data.cast()),
-                TagID::Short => MutValue::Short(&mut *data.cast()),
-                TagID::Int => MutValue::Int(&mut *data.cast()),
-                TagID::Long => MutValue::Long(&mut *data.cast()),
-                TagID::Float => MutValue::Float(&mut *data.cast()),
-                TagID::Double => MutValue::Double(&mut *data.cast()),
-                TagID::ByteArray => MutValue::ByteArray(vec_mut(data)),
-                TagID::String => MutValue::String(StringMut {
-                    ptr: &mut *data.cast(),
-                    len: &mut *data.add(SIZE_USIZE).cast(),
-                    cap: &mut *data.add(SIZE_USIZE * 2).cast(),
-                }),
-                TagID::List => MutValue::List(MutList {
-                    data: vec_mut(data),
-                    _marker: PhantomData,
-                }),
-                TagID::Compound => MutValue::Compound(MutCompound {
-                    data: vec_mut(data),
-                    _marker: PhantomData,
-                }),
-                TagID::IntArray => MutValue::IntArray(vec_mut(data)),
-                TagID::LongArray => MutValue::LongArray(vec_mut(data)),
-            }
-        }
+        dispatch!(
+            End, Byte, Short, Int, Long, Float, Double, ByteArray, String, List, Compound,
+            IntArray, LongArray
+        )
     }
 
     unsafe fn list_push<'a, T: NBT>(
@@ -180,12 +304,26 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
         value: T::Type<Self::ByteOrder>,
     ) {
         unsafe {
-            let tag_size = mutable_tag_size(T::TAG_ID);
+            let tag_size = const { mutable_tag_size(T::TAG_ID) };
             let len_bytes = params.len();
             params.reserve(tag_size);
             ptr::write(params.as_mut_ptr().add(len_bytes).cast(), value);
             params.set_len(len_bytes + tag_size);
             list_increase::<O>(&mut params);
+        }
+    }
+
+    #[inline]
+    unsafe fn list_pop<'a, T: NBT>(
+        mut params: Self::WriteParams<'a>,
+    ) -> T::Type<Self::ByteOrder> {
+        unsafe {
+            let tag_size = const { mutable_tag_size(T::TAG_ID) };
+            let new_len = params.len() - tag_size;
+            let value = ptr::read(params.as_mut_ptr().add(new_len).cast());
+            params.set_len(new_len);
+            list_decrease::<O>(&mut params);
+            value
         }
     }
 
@@ -210,7 +348,7 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
         value: T::Type<Self::ByteOrder>,
     ) {
         unsafe {
-            let tag_size = mutable_tag_size(T::TAG_ID);
+            let tag_size = const { mutable_tag_size(T::TAG_ID) };
             let pos_bytes = index * tag_size + 1 + 4;
             let len_bytes = params.len();
             params.reserve(tag_size);
@@ -219,6 +357,24 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
             ptr::write(start.cast(), value);
             params.set_len(len_bytes + tag_size);
             list_increase::<O>(&mut params);
+        }
+    }
+
+    #[inline]
+    unsafe fn list_remove<'a, T: NBT>(
+        mut params: Self::WriteParams<'a>,
+        index: usize,
+    ) -> T::Type<Self::ByteOrder> {
+        unsafe {
+            let tag_size = const { mutable_tag_size(T::TAG_ID) };
+            let pos_bytes = index * tag_size + 1 + 4;
+            let len_bytes = params.len();
+            let start = params.as_mut_ptr().add(pos_bytes);
+            let value = ptr::read(start.cast());
+            ptr::copy(start.add(tag_size), start, len_bytes - pos_bytes - tag_size);
+            params.set_len(len_bytes - tag_size);
+            list_decrease::<O>(&mut params);
+            value
         }
     }
 
@@ -247,7 +403,7 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
         value: T::Type<Self::ByteOrder>,
     ) {
         assert!(
-            T::TAG_ID != TagID::End,
+            const { T::TAG_ID as u8 != TagID::End as u8 },
             "End cannot be inserted into a compound"
         );
         unsafe {
@@ -257,7 +413,7 @@ impl<O: ByteOrder> ConfigMut for MutableConfig<O> {
                 "compound key length too long"
             );
             let name_len = byteorder::U16::<O>::new(name_bytes.len() as u16).to_bytes();
-            let tag_size = mutable_tag_size(T::TAG_ID);
+            let tag_size = const { mutable_tag_size(T::TAG_ID) };
             let old_len = params.len();
 
             params.reserve(1 + 2 + name_bytes.len() + tag_size);
