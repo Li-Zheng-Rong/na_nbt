@@ -17,13 +17,19 @@ pub(crate) struct Mark {
 }
 
 pub(crate) const INLINE_MARKS: usize = 8;
+const MODE_SHIFT: u32 = usize::BITS - 5;
+const FLAGS_MASK: usize = 0x1Fusize << MODE_SHIFT;
+const NAMELESS_MODE: usize = 0x10usize << MODE_SHIFT;
 
 /// Inline-first structural index storing up to [`INLINE_MARKS`] container marks without heap
 /// allocation, spilling seamlessly to a heap buffer for larger documents.
 pub(crate) struct SmallMarks {
     heap: *mut Mark,
     len: usize,
-    /// `0` when marks live in `inline[..len]`; `> 0` when `heap` owns an allocation of `cap` marks.
+    /// Lower bits hold heap capacity (`0` when inline); top 5 bits (`FLAGS_MASK`) encode root header mode:
+    /// - `0`: standard named root (`[tag_id][u16 name_len][name][payload]`)
+    /// - `0x10`: nameless root (`[tag_id][payload]`)
+    /// - `1..=12`: payload-only root (`[payload]`, `tag_id = mode`)
     cap: usize,
     inline: [MaybeUninit<Mark>; INLINE_MARKS],
 }
@@ -34,17 +40,27 @@ unsafe impl Sync for SmallMarks {}
 impl SmallMarks {
     #[inline(always)]
     pub(crate) const fn new() -> Self {
+        Self::with_nameless(false)
+    }
+
+    #[inline(always)]
+    pub(crate) const fn with_nameless(nameless: bool) -> Self {
         Self {
             heap: ptr::null_mut(),
             len: 0,
-            cap: 0,
+            cap: if nameless { NAMELESS_MODE } else { 0 },
             inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
         }
     }
 
     #[inline(always)]
+    pub(crate) const fn mode(&self) -> u8 {
+        (self.cap >> MODE_SHIFT) as u8
+    }
+
+    #[inline(always)]
     pub(crate) fn as_ptr(&self) -> *const Mark {
-        if self.cap == 0 {
+        if self.heap.is_null() {
             self.inline.as_ptr().cast::<Mark>()
         } else {
             self.heap.cast_const()
@@ -55,9 +71,14 @@ impl SmallMarks {
 impl Clone for SmallMarks {
     fn clone(&self) -> Self {
         let len = self.len;
+        let flag = self.cap & FLAGS_MASK;
         if len <= INLINE_MARKS {
-            let mut out = Self::new();
-            out.len = len;
+            let mut out = Self {
+                heap: ptr::null_mut(),
+                len,
+                cap: flag,
+                inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
+            };
             unsafe {
                 ptr::copy_nonoverlapping(
                     self.as_ptr().cast::<MaybeUninit<Mark>>(),
@@ -81,7 +102,7 @@ impl Clone for SmallMarks {
             Self {
                 heap: new_ptr,
                 len,
-                cap: new_cap,
+                cap: new_cap | flag,
                 inline: [const { MaybeUninit::uninit() }; INLINE_MARKS],
             }
         }
@@ -91,12 +112,12 @@ impl Clone for SmallMarks {
 impl Drop for SmallMarks {
     #[inline]
     fn drop(&mut self) {
-        if self.cap != 0 {
+        if !self.heap.is_null() {
             unsafe {
                 drop(Vec::<MaybeUninit<Mark>>::from_raw_parts(
                     self.heap.cast::<MaybeUninit<Mark>>(),
                     0,
-                    self.cap,
+                    self.cap & !FLAGS_MASK,
                 ));
             }
         }
@@ -195,7 +216,7 @@ struct MarkBuf<'a> {
 impl<'a> MarkBuf<'a> {
     #[inline(always)]
     fn new(marks: &'a mut SmallMarks) -> Self {
-        debug_assert_eq!(marks.cap, 0);
+        debug_assert!(marks.heap.is_null());
         let ptr = marks.inline.as_mut_ptr().cast::<Mark>();
         Self {
             ptr,
@@ -209,7 +230,8 @@ impl<'a> MarkBuf<'a> {
     #[inline(never)]
     fn reserve_slow(&mut self, additional: usize, rem_bytes: usize) {
         let required = self.len + additional;
-        if self.marks.cap == 0 {
+        let flag = self.marks.cap & FLAGS_MASK;
+        if self.marks.heap.is_null() {
             let target_cap = (self.len + 1 + rem_bytes / 24)
                 .max(INLINE_MARKS * 2)
                 .max(required);
@@ -225,11 +247,11 @@ impl<'a> MarkBuf<'a> {
                 );
             }
             self.marks.heap = new_ptr;
-            self.marks.cap = actual_cap;
+            self.marks.cap = actual_cap | flag;
             self.ptr = new_ptr;
             self.cap = actual_cap;
         } else {
-            self.marks.cap = 0;
+            self.marks.heap = ptr::null_mut();
             let mut v = unsafe {
                 Vec::<MaybeUninit<Mark>>::from_raw_parts(
                     self.ptr.cast::<MaybeUninit<Mark>>(),
@@ -242,7 +264,7 @@ impl<'a> MarkBuf<'a> {
             let actual_cap = v.capacity();
             let _ = ManuallyDrop::new(v);
             self.marks.heap = new_ptr;
-            self.marks.cap = actual_cap;
+            self.marks.cap = actual_cap | flag;
             self.ptr = new_ptr;
             self.cap = actual_cap;
         }
@@ -433,8 +455,24 @@ unsafe fn parse_list<O: ByteOrder>(
     }
 }
 
-pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8], out_marks: &mut SmallMarks) -> Result<()> {
-    let mut pos = src.as_ptr();
+#[inline]
+pub(crate) fn parse_marks<O: ByteOrder, const NAMELESS: bool>(
+    src: &[u8],
+    out_marks: &mut SmallMarks,
+) -> Result<()> {
+    let consumed = parse_marks_prefix::<O, NAMELESS>(src, out_marks)?;
+    if consumed != src.len() {
+        cold_path();
+        return Err(Error::REMAIN(src.len() - consumed));
+    }
+    Ok(())
+}
+
+#[inline(always)]
+pub(crate) fn parse_marks_prefix<O: ByteOrder, const NAMELESS: bool>(
+    src: &[u8],
+    out_marks: &mut SmallMarks,
+) -> Result<usize> {
     let len = src.len();
     if len == 0 {
         cold_path();
@@ -446,29 +484,49 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8], out_marks: &mut SmallMarks) 
     }
 
     unsafe {
-        let end_pos = pos.add(len);
+        let pos = src.as_ptr();
         let root_tag = *pos;
         if root_tag == 0 {
             cold_path();
-            return if len == 1 {
-                Ok(())
-            } else {
-                Err(Error::REMAIN(len - 1))
-            };
+            return Ok(1);
         }
 
-        if len < 3 {
-            cold_path();
-            return Err(Error::EOF);
-        }
-        let root_name_len = byteorder::U16::<O>::from_bytes(*pos.add(1).cast()).get() as usize;
-        let root_hdr = 3 + root_name_len;
-        if len < root_hdr {
-            cold_path();
-            return Err(Error::EOF);
-        }
-        pos = pos.add(root_hdr);
-        let rem = len - root_hdr;
+        let root_hdr = if NAMELESS {
+            1
+        } else {
+            if len < 3 {
+                cold_path();
+                return Err(Error::EOF);
+            }
+            let root_name_len = byteorder::U16::<O>::from_bytes(*pos.add(1).cast()).get() as usize;
+            let hdr = 3 + root_name_len;
+            if len < hdr {
+                cold_path();
+                return Err(Error::EOF);
+            }
+            hdr
+        };
+        let payload_len = parse_marks_payload::<O>(root_tag, &src[root_hdr..], out_marks)?;
+        Ok(root_hdr + payload_len)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn parse_marks_payload<O: ByteOrder>(
+    root_tag: u8,
+    payload: &[u8],
+    out_marks: &mut SmallMarks,
+) -> Result<usize> {
+    let base_pos = payload.as_ptr();
+    let mut pos = base_pos;
+    let rem = payload.len();
+    if rem > u32::MAX as usize {
+        cold_path();
+        return Err(Error::LEN(rem));
+    }
+
+    unsafe {
+        let end_pos = pos.add(rem);
 
         enum Mode {
             Compound,
@@ -496,11 +554,7 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8], out_marks: &mut SmallMarks) 
                     8 => skip_str::<O>(pos, end_pos)?,
                     _ => skip_array::<O>(pos, end_pos, TagID::elem_size_raw(root_tag))?,
                 };
-                if end != end_pos {
-                    cold_path();
-                    return Err(Error::REMAIN((end_pos as usize) - (end as usize)));
-                }
-                return Ok(());
+                return Ok((end as usize) - (base_pos as usize));
             }
             9 => mode = Mode::ListElement,
             10 => {
@@ -517,12 +571,8 @@ pub(crate) fn parse_marks<O: ByteOrder>(src: &[u8], out_marks: &mut SmallMarks) 
             () => {{
                 loop {
                     if stack.is_empty() {
-                        if pos != end_pos {
-                            cold_path();
-                            return Err(Error::REMAIN((end_pos as usize) - (pos as usize)));
-                        }
                         mark.commit();
-                        return Ok(());
+                        return Ok((pos as usize) - (base_pos as usize));
                     }
                     let top = stack.last_mut();
                     match top.kind {

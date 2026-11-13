@@ -6,7 +6,6 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
-use na_nbt::Writable;
 
 fn bench_read_file(filename: &str, c: &mut Criterion) {
     let mut file = File::open(format!("tests/{filename}")).unwrap();

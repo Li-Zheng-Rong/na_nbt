@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use na_nbt::{
     from_slice_be, from_slice_le, read_borrowed, read_owned, read_shared, AsValueRef, BigEndian,
-    CompoundOwn, ListOwn, LittleEndian, ValueOwn, ValueRef, Writable,
+    Compound, List, LittleEndian, Value, ValueRef,
 };
 use na_nbt::{to_vec_be, to_vec_le};
 use serde::{Deserialize, Serialize};
@@ -265,13 +265,23 @@ fn test_round<'doc>(value: impl AsValueRef<'doc>) {
     let vec_big = value.write_to_vec::<BigEndian>();
     {
         let mut vec = Vec::new();
-        value.write_to_writer::<BigEndian>(&mut vec).unwrap();
+        value.write_to::<BigEndian>(&mut vec).unwrap();
         assert_eq!(vec, vec_big);
+
+        let mut prefixed = b"prefix".to_vec();
+        value.write_into::<BigEndian>(&mut prefixed);
+        assert_eq!(&prefixed[..6], b"prefix");
+        assert_eq!(&prefixed[6..], vec_big.as_slice());
     }
     {
         let mut vec = Vec::new();
-        value.write_to_writer::<LittleEndian>(&mut vec).unwrap();
+        value.write_to::<LittleEndian>(&mut vec).unwrap();
         assert_eq!(vec, vec_little);
+
+        let mut prefixed = b"prefix".to_vec();
+        value.write_into::<LittleEndian>(&mut prefixed);
+        assert_eq!(&prefixed[..6], b"prefix");
+        assert_eq!(&prefixed[6..], vec_little.as_slice());
     }
     {
         let vec = vec_big;
@@ -385,49 +395,50 @@ fn test_read_write() {
     assert!(count > 0);
 }
 
-fn test_writable<V: Writable + ?Sized>(value: &V) {
-    test_direct(&value.write_to_vec::<BigEndian>());
-    test_direct(&value.write_to_vec::<LittleEndian>());
+fn test_writable<'a>(value: impl AsValueRef<'a>) {
+    let v = value.as_value_ref();
+    test_direct(&v.write_to_vec_be());
+    test_direct(&v.write_to_vec_le());
 }
 
 #[test]
 fn test_construct_read_write() {
-    test_writable(&());
-    test_writable(&42_i8);
-    test_writable(&13413_i16);
-    test_writable(&114514_i32);
-    test_writable(&1145141919810_i64);
-    test_writable(&std::f32::consts::PI);
-    test_writable(&std::f64::consts::E);
-    test_writable(&[1_i8, 2, 3, 4, 5]);
-    test_writable(&[
+    test_writable(ValueRef::<na_nbt::Borrowed>::End);
+    test_writable(ValueRef::<na_nbt::Borrowed>::Byte(42_i8));
+    test_writable(ValueRef::<na_nbt::Borrowed>::Short(13413_i16));
+    test_writable(ValueRef::<na_nbt::Borrowed>::Int(114514_i32));
+    test_writable(ValueRef::<na_nbt::Borrowed>::Long(1145141919810_i64));
+    test_writable(ValueRef::<na_nbt::Borrowed>::Float(std::f32::consts::PI));
+    test_writable(ValueRef::<na_nbt::Borrowed>::Double(std::f64::consts::E));
+    test_writable(ValueRef::<na_nbt::Borrowed>::ByteArray(&[1_i8, 2, 3, 4, 5]));
+    test_writable(ValueRef::<na_nbt::Borrowed<BigEndian>>::IntArray(&[
         byteorder::I32::<BigEndian>::new(1),
         2.into(),
         3.into(),
         4.into(),
         5.into(),
-    ]);
-    test_writable(&[
+    ]));
+    test_writable(ValueRef::<na_nbt::Borrowed<LittleEndian>>::IntArray(&[
         byteorder::I32::<LittleEndian>::new(1),
         2.into(),
         3.into(),
         4.into(),
         5.into(),
-    ]);
-    test_writable(&[
+    ]));
+    test_writable(ValueRef::<na_nbt::Borrowed<BigEndian>>::LongArray(&[
         byteorder::I64::<BigEndian>::new(1),
         2.into(),
         3.into(),
         4.into(),
         5.into(),
-    ]);
-    test_writable(&[
+    ]));
+    test_writable(ValueRef::<na_nbt::Borrowed<LittleEndian>>::LongArray(&[
         byteorder::I64::<LittleEndian>::new(1),
         2.into(),
         3.into(),
         4.into(),
         5.into(),
-    ]);
+    ]));
 }
 
 #[test]
@@ -478,7 +489,7 @@ fn test_serde_read_write() {
 #[test]
 fn test_complex_nbt_round_trip() {
     // Create a complex NBT structure
-    let mut root = CompoundOwn::<BigEndian>::default();
+    let mut root = Compound::<BigEndian>::default();
 
     // Add primitives
     root.insert("byte", 42i8);
@@ -510,26 +521,26 @@ fn test_complex_nbt_round_trip() {
     root.insert("long_array", long_data);
 
     // Add list of ints
-    let mut int_list = ListOwn::<BigEndian>::default();
+    let mut int_list = List::<BigEndian>::default();
     for i in 0..5 {
         int_list.push(i * 10);
     }
     root.insert("int_list", int_list);
 
     // Add list of strings
-    let mut string_list = ListOwn::<BigEndian>::default();
+    let mut string_list = List::<BigEndian>::default();
     string_list.push("alpha");
     string_list.push("beta");
     string_list.push("gamma");
     root.insert("string_list", string_list);
 
     // Add nested compound
-    let mut nested = CompoundOwn::<BigEndian>::default();
+    let mut nested = Compound::<BigEndian>::default();
     nested.insert("id", 999i32);
     nested.insert("name", "nested_compound");
 
     // Add doubly nested compound
-    let mut deep = CompoundOwn::<BigEndian>::default();
+    let mut deep = Compound::<BigEndian>::default();
     deep.insert("value", 42i32);
     deep.insert("flag", 1i8);
     nested.insert("deep", deep);
@@ -537,9 +548,9 @@ fn test_complex_nbt_round_trip() {
     root.insert("nested", nested);
 
     // Add list of compounds
-    let mut compound_list = ListOwn::<BigEndian>::default();
+    let mut compound_list = List::<BigEndian>::default();
     for i in 0..3 {
-        let mut item = CompoundOwn::<BigEndian>::default();
+        let mut item = Compound::<BigEndian>::default();
         item.insert("index", i);
         item.insert("name", format!("item_{}", i).as_str());
         compound_list.push(item);
@@ -547,9 +558,9 @@ fn test_complex_nbt_round_trip() {
     root.insert("compound_list", compound_list);
 
     // Add nested list (list of lists)
-    let mut nested_list = ListOwn::<BigEndian>::default();
+    let mut nested_list = List::<BigEndian>::default();
     for i in 0..2 {
-        let mut inner = ListOwn::<BigEndian>::default();
+        let mut inner = List::<BigEndian>::default();
         for j in 0..3 {
             inner.push(i * 10 + j);
         }
@@ -557,7 +568,7 @@ fn test_complex_nbt_round_trip() {
     }
     root.insert("nested_list", nested_list);
 
-    // Convert to ValueOwn for writing
-    let value = ValueOwn::<BigEndian>::Compound(root);
+    // Convert to Value for writing
+    let value = Value::<BigEndian>::Compound(root);
     test_round(&value);
 }

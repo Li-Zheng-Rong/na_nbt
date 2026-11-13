@@ -12,7 +12,7 @@ use crate::{
     owned::slot::{drop_compound_entries, drop_list_elements, slot_write, SIZE_DYN},
     same_byte_order,
     write::{swap_u16, swap_u32, swap_u64},
-    ByteOrder, CompoundOwn, Error, ListOwn, MUTF8String, Result, TagID, ValueOwn,
+    ByteOrder, Compound, Error, List, MUTF8String, Result, TagID, Value,
 };
 
 struct CompoundBuildGuard<O: ByteOrder> {
@@ -36,7 +36,7 @@ impl<O: ByteOrder> CompoundBuildGuard<O> {
     }
 
     #[inline(always)]
-    unsafe fn finish(mut self, start: *const u8, end: *const u8) -> CompoundOwn<O> {
+    unsafe fn finish(mut self, start: *const u8, end: *const u8) -> Compound<O> {
         let raw_len = (end as usize) - (start as usize);
         let old_len = self.data.len();
         if old_len == 0 && raw_len == 1 {
@@ -45,7 +45,7 @@ impl<O: ByteOrder> CompoundBuildGuard<O> {
                 std::mem::forget(self);
                 drop(v);
             }
-            return CompoundOwn::new();
+            return Compound::new();
         }
         if self.data.capacity() - old_len < raw_len {
             self.data.reserve(raw_len);
@@ -62,7 +62,7 @@ impl<O: ByteOrder> CompoundBuildGuard<O> {
             std::mem::forget(self);
             v
         };
-        CompoundOwn {
+        Compound {
             data: vec,
             _marker: PhantomData,
         }
@@ -201,10 +201,10 @@ unsafe fn read_i64_vec<O: ByteOrder, R: ByteOrder>(
     out
 }
 
-unsafe fn read_compound<O: ByteOrder, R: ByteOrder>(
+pub(crate) unsafe fn read_compound<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
-) -> Result<CompoundOwn<R>> {
+) -> Result<Compound<R>> {
     let same_order = const { same_byte_order::<O, R>() };
     let mut guard = CompoundBuildGuard::<R>::new();
 
@@ -334,10 +334,10 @@ unsafe fn read_compound<O: ByteOrder, R: ByteOrder>(
     }
 }
 
-unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
+pub(crate) unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
     current_pos: &mut *const u8,
     end_pos: *const u8,
-) -> Result<ListOwn<R>> {
+) -> Result<List<R>> {
     let same_order = const { same_byte_order::<O, R>() };
     unsafe {
         let list_start = *current_pos;
@@ -350,7 +350,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
 
         if tag_id == 0 && len == 0 {
             *current_pos = pos;
-            return Ok(ListOwn::new());
+            return Ok(List::new());
         }
 
         macro_rules! write_list_hdr {
@@ -374,7 +374,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
                 check_rem(rem_after, bytes)?;
                 let value = slice::from_raw_parts(list_start, 5 + bytes).to_vec();
                 *current_pos = pos.add(bytes);
-                return Ok(ListOwn {
+                return Ok(List {
                     data: value,
                     _marker: PhantomData,
                 });
@@ -399,7 +399,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
                     }
                     *current_pos = pos.add(bytes);
                     list_data.set_len(5 + bytes);
-                    return Ok(ListOwn {
+                    return Ok(List {
                         data: list_data,
                         _marker: PhantomData,
                     });
@@ -412,7 +412,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
                     write_list_hdr!(list_data, len as u32);
                     list_data.set_len(5);
                     *current_pos = pos;
-                    Ok(ListOwn {
+                    Ok(List {
                         data: list_data,
                         _marker: PhantomData,
                     })
@@ -424,7 +424,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
                     ptr::copy_nonoverlapping(pos, write_ptr.add(5), len);
                     *current_pos = pos.add(len);
                     list_data.set_len(5 + len);
-                    Ok(ListOwn {
+                    Ok(List {
                         data: list_data,
                         _marker: PhantomData,
                     })
@@ -447,7 +447,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
                     }
                     *current_pos = pos.add(bytes);
                     list_data.set_len(5 + bytes);
-                    Ok(ListOwn {
+                    Ok(List {
                         data: list_data,
                         _marker: PhantomData,
                     })
@@ -466,7 +466,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
             write_list_hdr!(list_data, 0);
             list_data.set_len(5);
             *current_pos = pos;
-            return Ok(ListOwn {
+            return Ok(List {
                 data: list_data,
                 _marker: PhantomData,
             });
@@ -522,12 +522,12 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
             }),
             9 => {
                 *current_pos = pos;
-                push_elems!(ListOwn<R>, read_list::<O, R>(current_pos, end_pos)?);
+                push_elems!(List<R>, read_list::<O, R>(current_pos, end_pos)?);
                 pos = *current_pos;
             }
             10 => {
                 *current_pos = pos;
-                push_elems!(CompoundOwn<R>, read_compound::<O, R>(current_pos, end_pos)?);
+                push_elems!(Compound<R>, read_compound::<O, R>(current_pos, end_pos)?);
                 pos = *current_pos;
             }
             11 => push_elems!(Vec<byteorder::I32<R>>, {
@@ -547,7 +547,7 @@ unsafe fn read_list<O: ByteOrder, R: ByteOrder>(
             _ => core::hint::unreachable_unchecked(),
         }
         *current_pos = pos;
-        Ok(ListOwn {
+        Ok(List {
             data: guard.finalize(),
             _marker: PhantomData,
         })
@@ -558,7 +558,7 @@ pub(crate) unsafe fn read_unsafe<O: ByteOrder, R: ByteOrder>(
     tag_id: u8,
     current_pos: &mut *const u8,
     end_pos: *const u8,
-) -> Result<ValueOwn<R>> {
+) -> Result<Value<R>> {
     let pos = *current_pos;
     let rem = (end_pos as usize) - (pos as usize);
 
@@ -568,69 +568,69 @@ pub(crate) unsafe fn read_unsafe<O: ByteOrder, R: ByteOrder>(
             1 => {
                 check_rem(rem, 1)?;
                 *current_pos = pos.add(1);
-                Ok(ValueOwn::Byte(*pos.cast()))
+                Ok(Value::Byte(*pos.cast()))
             }
             2 => {
                 check_rem(rem, 2)?;
                 *current_pos = pos.add(2);
-                Ok(ValueOwn::Short(
+                Ok(Value::Short(
                     byteorder::I16::<O>::from_bytes(*pos.cast()).get(),
                 ))
             }
             3 => {
                 check_rem(rem, 4)?;
                 *current_pos = pos.add(4);
-                Ok(ValueOwn::Int(
+                Ok(Value::Int(
                     byteorder::I32::<O>::from_bytes(*pos.cast()).get(),
                 ))
             }
             4 => {
                 check_rem(rem, 8)?;
                 *current_pos = pos.add(8);
-                Ok(ValueOwn::Long(
+                Ok(Value::Long(
                     byteorder::I64::<O>::from_bytes(*pos.cast()).get(),
                 ))
             }
             5 => {
                 check_rem(rem, 4)?;
                 *current_pos = pos.add(4);
-                Ok(ValueOwn::Float(
+                Ok(Value::Float(
                     byteorder::F32::<O>::from_bytes(*pos.cast()).get(),
                 ))
             }
             6 => {
                 check_rem(rem, 8)?;
                 *current_pos = pos.add(8);
-                Ok(ValueOwn::Double(
+                Ok(Value::Double(
                     byteorder::F64::<O>::from_bytes(*pos.cast()).get(),
                 ))
             }
             7 => {
                 let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 1)?;
                 *current_pos = pos.add(4 + bytes);
-                Ok(ValueOwn::ByteArray(
+                Ok(Value::ByteArray(
                     slice::from_raw_parts(pos.add(4).cast::<i8>(), len).to_vec(),
                 ))
             }
             8 => {
                 let (s, next) = read_u16_str_slice::<O>(pos, rem)?;
                 *current_pos = next;
-                Ok(ValueOwn::String(MUTF8String::from_raw_slice(s)))
+                Ok(Value::String(MUTF8String::from_raw_slice(s)))
             }
-            9 => Ok(ValueOwn::List(read_list::<O, R>(current_pos, end_pos)?)),
-            10 => Ok(ValueOwn::Compound(read_compound::<O, R>(
+            9 => Ok(Value::List(read_list::<O, R>(current_pos, end_pos)?)),
+            10 => Ok(Value::Compound(read_compound::<O, R>(
                 current_pos,
                 end_pos,
             )?)),
             11 => {
                 let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 4)?;
                 *current_pos = pos.add(4 + bytes);
-                Ok(ValueOwn::IntArray(read_i32_vec::<O, R>(pos.add(4), len)))
+                Ok(Value::IntArray(read_i32_vec::<O, R>(pos.add(4), len)))
             }
             12 => {
                 let (len, bytes) = read_u32_array_bytes::<O>(pos, rem, 8)?;
                 *current_pos = pos.add(4 + bytes);
-                Ok(ValueOwn::LongArray(read_i64_vec::<O, R>(pos.add(4), len)))
+                Ok(Value::LongArray(read_i64_vec::<O, R>(pos.add(4), len)))
             }
             _ => {
                 cold_path();

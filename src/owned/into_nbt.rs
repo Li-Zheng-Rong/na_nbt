@@ -1,16 +1,18 @@
 use std::{borrow::Cow, mem::ManuallyDrop, ptr, slice};
 
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian};
 
 use crate::{
-    same_byte_order, tag,
+    same_byte_order,
     write::{swap_u32, swap_u64},
-    ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, TypedListOwn,
+    ByteOrder, Compound, ElementTag, List, MUTF8Str, MUTF8String, TypedList,
 };
 
 /// Converts Rust values into owned NBT payloads with statically known [`ElementTag`].
-pub trait IntoNBT<O: ByteOrder> {
-    type Tag: ElementTag;
+pub trait IntoNBT<O: ByteOrder = BigEndian> {
+    /// Canonical [`ElementTag`] (`i32`, `str`, `[i8]`, [`Compound`], [`List`], etc.) produced by `self`.
+    type Tag: ?Sized + ElementTag;
+    /// Converts `self` into its owned NBT storage payload for byte order `O`.
     fn into_nbt(self) -> <Self::Tag as crate::Tag>::Own<O>;
 }
 
@@ -29,24 +31,32 @@ macro_rules! impl_into_nbt_identity {
 }
 
 impl_into_nbt_identity!(
-    () => tag::End,
-    i8 => tag::Byte,
-    i16 => tag::Short,
-    i32 => tag::Int,
-    i64 => tag::Long,
-    f32 => tag::Float,
-    f64 => tag::Double,
-    Vec<i8> => tag::ByteArray,
-    MUTF8String => tag::String,
-    ListOwn<O> => tag::List,
-    CompoundOwn<O> => tag::Compound,
+    () => (),
+    i8 => i8,
+    i16 => i16,
+    i32 => i32,
+    i64 => i64,
+    f32 => f32,
+    f64 => f64,
+    Vec<i8> => [i8],
+    MUTF8String => str,
+    List<O> => List<BigEndian>,
+    Compound<O> => Compound<BigEndian>,
 );
 
+impl<O: ByteOrder> IntoNBT<O> for bool {
+    type Tag = i8;
+    #[inline(always)]
+    fn into_nbt(self) -> i8 {
+        i8::from(self)
+    }
+}
+
 macro_rules! impl_into_nbt_endian_scalar {
-    ($($wrapper:ident => ($prim:ty, $tag:ty)),* $(,)?) => {
+    ($($wrapper:ident => $prim:ty),* $(,)?) => {
         $(
             impl<O: ByteOrder, R: ByteOrder> IntoNBT<O> for byteorder::$wrapper<R> {
-                type Tag = $tag;
+                type Tag = $prim;
                 #[inline(always)]
                 fn into_nbt(self) -> $prim {
                     self.get()
@@ -57,15 +67,15 @@ macro_rules! impl_into_nbt_endian_scalar {
 }
 
 impl_into_nbt_endian_scalar!(
-    I16 => (i16, tag::Short),
-    I32 => (i32, tag::Int),
-    I64 => (i64, tag::Long),
-    F32 => (f32, tag::Float),
-    F64 => (f64, tag::Double),
+    I16 => i16,
+    I32 => i32,
+    I64 => i64,
+    F32 => f32,
+    F64 => f64,
 );
 
 impl<O: ByteOrder> IntoNBT<O> for &[i8] {
-    type Tag = tag::ByteArray;
+    type Tag = [i8];
     #[inline]
     fn into_nbt(self) -> Vec<i8> {
         self.to_vec()
@@ -73,7 +83,7 @@ impl<O: ByteOrder> IntoNBT<O> for &[i8] {
 }
 
 impl<O: ByteOrder, const N: usize> IntoNBT<O> for [i8; N] {
-    type Tag = tag::ByteArray;
+    type Tag = [i8];
     #[inline]
     fn into_nbt(self) -> Vec<i8> {
         self.to_vec()
@@ -81,7 +91,7 @@ impl<O: ByteOrder, const N: usize> IntoNBT<O> for [i8; N] {
 }
 
 impl<O: ByteOrder, const N: usize> IntoNBT<O> for &[i8; N] {
-    type Tag = tag::ByteArray;
+    type Tag = [i8];
     #[inline]
     fn into_nbt(self) -> Vec<i8> {
         self.to_vec()
@@ -92,7 +102,7 @@ macro_rules! impl_into_nbt_string {
     ($($ty:ty),* $(,)?) => {
         $(
             impl<'a, O: ByteOrder> IntoNBT<O> for $ty {
-                type Tag = tag::String;
+                type Tag = str;
                 #[inline]
                 fn into_nbt(self) -> MUTF8String {
                     MUTF8String::from(self)
@@ -105,7 +115,7 @@ macro_rules! impl_into_nbt_string {
 impl_into_nbt_string!(&'a MUTF8Str, &'a str, Cow<'a, str>);
 
 impl<O: ByteOrder> IntoNBT<O> for String {
-    type Tag = tag::String;
+    type Tag = str;
     #[inline]
     fn into_nbt(self) -> MUTF8String {
         MUTF8String::from(self)
@@ -113,18 +123,18 @@ impl<O: ByteOrder> IntoNBT<O> for String {
 }
 
 impl<O: ByteOrder> IntoNBT<O> for &String {
-    type Tag = tag::String;
+    type Tag = str;
     #[inline]
     fn into_nbt(self) -> MUTF8String {
         MUTF8String::from(self.as_str())
     }
 }
 
-impl<O: ByteOrder, T: ElementTag> IntoNBT<O> for TypedListOwn<O, T> {
-    type Tag = tag::List;
+impl<T: ?Sized + ElementTag, O: ByteOrder> IntoNBT<O> for TypedList<T, O> {
+    type Tag = List<BigEndian>;
     #[inline]
-    fn into_nbt(self) -> ListOwn<O> {
-        ListOwn::from(self)
+    fn into_nbt(self) -> List<O> {
+        List::from(self)
     }
 }
 
@@ -236,5 +246,5 @@ macro_rules! impl_into_nbt_int_array {
     };
 }
 
-impl_into_nbt_int_array!(i32, I32, tag::IntArray, 4, swap_u32);
-impl_into_nbt_int_array!(i64, I64, tag::LongArray, 8, swap_u64);
+impl_into_nbt_int_array!(i32, I32, [i32], 4, swap_u32);
+impl_into_nbt_int_array!(i64, I64, [i64], 8, swap_u64);

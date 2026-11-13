@@ -2,25 +2,9 @@ use std::{convert::Infallible, io::Write, mem::MaybeUninit, ptr, slice};
 
 use zerocopy::byteorder;
 
-use crate::{same_byte_order, ByteOrder, Error, MUTF8Str, MUTF8String, Result, TagID};
-
-/// Serializes an NBT value to a byte vector or [`Write`] stream with a chosen target [`ByteOrder`].
-pub trait Writable {
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8>;
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()>;
-}
-
-impl<T: ?Sized + Writable> Writable for &T {
-    #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        (**self).write_to_vec::<TARGET>()
-    }
-
-    #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        (**self).write_to_writer::<TARGET>(writer)
-    }
-}
+use crate::{
+    same_byte_order, AsKey, AsValueRef, ByteOrder, Error, MUTF8Str, Result, Source, TagID, ValueRef,
+};
 
 #[inline(always)]
 pub(crate) fn swap_u16<O: ByteOrder, R: ByteOrder>(bytes: [u8; 2]) -> [u8; 2] {
@@ -37,7 +21,8 @@ pub(crate) fn swap_u64<O: ByteOrder, R: ByteOrder>(bytes: [u8; 8]) -> [u8; 8] {
     byteorder::U64::<R>::new(byteorder::U64::<O>::from_bytes(bytes).get()).to_bytes()
 }
 
-pub(crate) trait ByteSink {
+#[doc(hidden)]
+pub trait ByteSink {
     type Error;
 
     fn reserve(&mut self, additional: usize);
@@ -101,12 +86,10 @@ impl ByteSink for Vec<u8> {
         unsafe {
             let dst = self.as_mut_ptr().add(old_len);
             ptr::copy_nonoverlapping(prefix.as_ptr(), dst, prefix.len());
-            let dst_elems = slice::from_raw_parts_mut(
-                dst.add(prefix.len()).cast::<MaybeUninit<[u8; N]>>(),
-                src.len(),
-            );
-            for (out, &elem) in dst_elems.iter_mut().zip(src) {
-                out.write(swap(elem));
+            let mut elem_dst = dst.add(prefix.len()).cast::<MaybeUninit<[u8; N]>>();
+            for &elem in src {
+                (*elem_dst).write(swap(elem));
+                elem_dst = elem_dst.add(1);
             }
             self.set_len(old_len + total);
         }
@@ -114,7 +97,7 @@ impl ByteSink for Vec<u8> {
     }
 }
 
-pub(crate) struct IoSink<W>(pub(crate) W);
+pub(crate) struct IoSink<W>(pub W);
 
 impl<W: Write> ByteSink for IoSink<W> {
     type Error = Error;
@@ -141,7 +124,7 @@ impl<W: Write> ByteSink for IoSink<W> {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_swapped_slice<const N: usize>(
         &mut self,
         prefix: &[u8],
@@ -168,185 +151,425 @@ pub(crate) fn sink_to_vec(
     buf
 }
 
-macro_rules! impl_writable_delegate {
-    ([$($generics:tt)*] $ty:ty => |$self:ident| $inner:expr) => {
-        impl<$($generics)*> Writable for $ty {
-            #[inline]
-            fn write_to_vec<TARGET: ByteOrder>(&$self) -> Vec<u8> {
-                ($inner).write_to_vec::<TARGET>()
-            }
+#[inline(always)]
+fn value_payload_size_hint<S: Source>(val: ValueRef<'_, S>) -> usize {
+    match val {
+        ValueRef::End => 0,
+        ValueRef::Byte(_) => 1,
+        ValueRef::Short(_) => 2,
+        ValueRef::Int(_) | ValueRef::Float(_) => 4,
+        ValueRef::Long(_) | ValueRef::Double(_) => 8,
+        ValueRef::ByteArray(v) => 4 + v.len(),
+        ValueRef::String(v) => 2 + v.len(),
+        ValueRef::IntArray(v) => 4 + v.len() * 4,
+        ValueRef::LongArray(v) => 4 + v.len() * 8,
+        ValueRef::List(v) => S::list_size_hint(v.cursor),
+        ValueRef::Compound(v) => S::compound_size_hint(v.cursor),
+    }
+}
 
-            #[inline]
-            fn write_to_writer<TARGET: ByteOrder>(&$self, writer: impl Write) -> Result<()> {
-                ($inner).write_to_writer::<TARGET>(writer)
-            }
+#[inline]
+pub(crate) fn write_value_with_header<S: Source, TARGET: ByteOrder, Sink: ByteSink>(
+    hdr: &[u8],
+    val: ValueRef<'_, S>,
+    sink: &mut Sink,
+) -> core::result::Result<(), Sink::Error> {
+    match val {
+        ValueRef::End => sink.write_bytes(&[0]),
+        ValueRef::Byte(v) => sink.write_2(hdr, &[v as u8]),
+        ValueRef::Short(v) => sink.write_2(hdr, &byteorder::I16::<TARGET>::new(v).to_bytes()),
+        ValueRef::Int(v) => sink.write_2(hdr, &byteorder::I32::<TARGET>::new(v).to_bytes()),
+        ValueRef::Long(v) => sink.write_2(hdr, &byteorder::I64::<TARGET>::new(v).to_bytes()),
+        ValueRef::Float(v) => sink.write_2(hdr, &byteorder::F32::<TARGET>::new(v).to_bytes()),
+        ValueRef::Double(v) => sink.write_2(hdr, &byteorder::F64::<TARGET>::new(v).to_bytes()),
+        ValueRef::ByteArray(v) => {
+            let bytes = unsafe { slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len()) };
+            let len = byteorder::U32::<TARGET>::new(v.len() as u32).to_bytes();
+            sink.write_3(hdr, &len, bytes)
         }
-    };
-    ($ty:ty => |$self:ident| $inner:expr) => {
-        impl Writable for $ty {
-            #[inline]
-            fn write_to_vec<TARGET: ByteOrder>(&$self) -> Vec<u8> {
-                ($inner).write_to_vec::<TARGET>()
-            }
-
-            #[inline]
-            fn write_to_writer<TARGET: ByteOrder>(&$self, writer: impl Write) -> Result<()> {
-                ($inner).write_to_writer::<TARGET>(writer)
-            }
+        ValueRef::String(v) => {
+            let bytes = v.as_bytes();
+            assert!(
+                bytes.len() <= u16::MAX as usize,
+                "NBT string length too long"
+            );
+            let len = byteorder::U16::<TARGET>::new(bytes.len() as u16).to_bytes();
+            sink.write_3(hdr, &len, bytes)
         }
-    };
-}
-
-impl Writable for () {
-    #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        vec![0]
+        ValueRef::IntArray(v) => write_endian_array_with_header::<S::Order, TARGET, Sink, 4>(
+            hdr,
+            v,
+            swap_u32::<S::Order, TARGET>,
+            sink,
+        ),
+        ValueRef::LongArray(v) => write_endian_array_with_header::<S::Order, TARGET, Sink, 8>(
+            hdr,
+            v,
+            swap_u64::<S::Order, TARGET>,
+            sink,
+        ),
+        ValueRef::List(v) => S::write_list_with_header::<TARGET, Sink>(hdr, v.cursor, sink),
+        ValueRef::Compound(v) => S::write_compound_with_header::<TARGET, Sink>(hdr, v.cursor, sink),
     }
-
-    #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
-        writer.write_all(&[0]).map_err(Error::IO)
-    }
-}
-
-impl Writable for i8 {
-    #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        vec![TagID::Byte as u8, 0, 0, *self as u8]
-    }
-
-    #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
-        writer
-            .write_all(&[TagID::Byte as u8, 0, 0, *self as u8])
-            .map_err(Error::IO)
-    }
-}
-
-macro_rules! impl_writable_primitive {
-    ($prim:ty, $wrapper:ident, $tag:ident, $size:literal) => {
-        impl Writable for $prim {
-            #[inline]
-            fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-                let mut buf = [0u8; 3 + $size];
-                buf[0] = TagID::$tag as u8;
-                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(*self).to_bytes());
-                buf.to_vec()
-            }
-
-            #[inline]
-            fn write_to_writer<TARGET: ByteOrder>(&self, mut writer: impl Write) -> Result<()> {
-                let mut buf = [0u8; 3 + $size];
-                buf[0] = TagID::$tag as u8;
-                buf[3..].copy_from_slice(&byteorder::$wrapper::<TARGET>::new(*self).to_bytes());
-                writer.write_all(&buf).map_err(Error::IO)
-            }
-        }
-
-        impl_writable_delegate!([O: ByteOrder] byteorder::$wrapper<O> => |self| self.get());
-    };
-}
-
-impl_writable_primitive!(i16, I16, Short, 2);
-impl_writable_primitive!(i32, I32, Int, 4);
-impl_writable_primitive!(i64, I64, Long, 8);
-impl_writable_primitive!(f32, F32, Float, 4);
-impl_writable_primitive!(f64, F64, Double, 8);
-
-impl Writable for [i8] {
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        let bytes = unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len()) };
-        let mut hdr = [0u8; 7];
-        hdr[0] = TagID::ByteArray as u8;
-        hdr[3..7].copy_from_slice(&byteorder::U32::<TARGET>::new(self.len() as u32).to_bytes());
-        sink_to_vec(7 + bytes.len(), |out| out.write_2(&hdr, bytes))
-    }
-
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        let bytes = unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len()) };
-        let mut hdr = [0u8; 7];
-        hdr[0] = TagID::ByteArray as u8;
-        hdr[3..7].copy_from_slice(&byteorder::U32::<TARGET>::new(self.len() as u32).to_bytes());
-        IoSink(writer).write_2(&hdr, bytes)
-    }
-}
-
-impl_writable_delegate!([const N: usize] [i8; N] => |self| self.as_slice());
-impl_writable_delegate!(Vec<i8> => |self| self.as_slice());
-
-impl Writable for MUTF8Str {
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        let bytes = self.as_bytes();
-        let mut hdr = [0u8; 5];
-        hdr[0] = TagID::String as u8;
-        hdr[3..5].copy_from_slice(&byteorder::U16::<TARGET>::new(bytes.len() as u16).to_bytes());
-        sink_to_vec(5 + bytes.len(), |out| out.write_2(&hdr, bytes))
-    }
-
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        let bytes = self.as_bytes();
-        let mut hdr = [0u8; 5];
-        hdr[0] = TagID::String as u8;
-        hdr[3..5].copy_from_slice(&byteorder::U16::<TARGET>::new(bytes.len() as u16).to_bytes());
-        IoSink(writer).write_2(&hdr, bytes)
-    }
-}
-
-impl_writable_delegate!(MUTF8String => |self| self.as_mutf8_str());
-
-macro_rules! impl_writable_endian_array {
-    ($wrapper:ident, $tag:ident, $elem_size:literal, $swap:ident) => {
-        impl<O: ByteOrder> Writable for [byteorder::$wrapper<O>] {
-            fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-                sink_to_vec(7 + self.len() * $elem_size, |out| {
-                    write_endian_array_sink::<O, TARGET, _, $elem_size>(
-                        self,
-                        TagID::$tag,
-                        $swap::<O, TARGET>,
-                        out,
-                    )
-                })
-            }
-
-            fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-                write_endian_array_sink::<O, TARGET, _, $elem_size>(
-                    self,
-                    TagID::$tag,
-                    $swap::<O, TARGET>,
-                    &mut IoSink(writer),
-                )
-            }
-        }
-
-        impl_writable_delegate!(
-            [O: ByteOrder, const N: usize] [byteorder::$wrapper<O>; N] => |self| self.as_slice()
-        );
-        impl_writable_delegate!(
-            [O: ByteOrder] Vec<byteorder::$wrapper<O>> => |self| self.as_slice()
-        );
-    };
 }
 
 #[inline(always)]
-fn write_endian_array_sink<O: ByteOrder, TARGET: ByteOrder, S: ByteSink, const N: usize>(
+fn write_endian_array_with_header<O: ByteOrder, TARGET: ByteOrder, S: ByteSink, const N: usize>(
+    hdr: &[u8],
     slice_ref: &[impl Sized],
-    tag: TagID,
     swap: impl Fn([u8; N]) -> [u8; N],
     sink: &mut S,
 ) -> core::result::Result<(), S::Error> {
-    let mut hdr = [0u8; 7];
-    hdr[0] = tag as u8;
-    hdr[3..7].copy_from_slice(&byteorder::U32::<TARGET>::new(slice_ref.len() as u32).to_bytes());
+    let len_bytes = byteorder::U32::<TARGET>::new(slice_ref.len() as u32).to_bytes();
     if const { same_byte_order::<O, TARGET>() } {
         let bytes =
             unsafe { slice::from_raw_parts(slice_ref.as_ptr().cast::<u8>(), slice_ref.len() * N) };
-        sink.write_2(&hdr, bytes)
+        sink.write_3(hdr, &len_bytes, bytes)
     } else {
+        sink.write_bytes(hdr)?;
         let elems =
             unsafe { slice::from_raw_parts(slice_ref.as_ptr().cast::<[u8; N]>(), slice_ref.len()) };
-        sink.write_swapped_slice(&hdr, elems, swap)
+        sink.write_swapped_slice(&len_bytes, elems, swap)
     }
 }
 
-impl_writable_endian_array!(I32, IntArray, 4, swap_u32);
-impl_writable_endian_array!(I64, LongArray, 8, swap_u64);
+#[inline(always)]
+fn with_named_header<TARGET: ByteOrder, R>(
+    tag_id: TagID,
+    name: &MUTF8Str,
+    f: impl FnOnce(&[u8]) -> R,
+) -> R {
+    if tag_id == TagID::End {
+        return f(&[0]);
+    }
+    let name_bytes = name.as_bytes();
+    assert!(
+        name_bytes.len() <= u16::MAX as usize,
+        "NBT root name length exceeds u16::MAX"
+    );
+    let len_raw = byteorder::U16::<TARGET>::new(name_bytes.len() as u16).to_bytes();
+    if name_bytes.len() <= 64 {
+        let mut stack_hdr = [0u8; 67];
+        stack_hdr[0] = tag_id as u8;
+        stack_hdr[1..3].copy_from_slice(&len_raw);
+        stack_hdr[3..3 + name_bytes.len()].copy_from_slice(name_bytes);
+        f(&stack_hdr[..3 + name_bytes.len()])
+    } else {
+        let mut heap_hdr = Vec::with_capacity(3 + name_bytes.len());
+        heap_hdr.push(tag_id as u8);
+        heap_hdr.extend_from_slice(&len_raw);
+        heap_hdr.extend_from_slice(name_bytes);
+        f(&heap_hdr)
+    }
+}
+
+/// Serializes any NBT value with an empty root name (`""`) into a new [`Vec<u8>`].
+#[inline]
+pub fn write_to_vec<'a, TARGET: ByteOrder>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    let val = value.as_value_ref();
+    if val.tag_id() == TagID::End {
+        return vec![0];
+    }
+    let hdr = [val.tag_id() as u8, 0, 0];
+    sink_to_vec(3 + value_payload_size_hint(val), |out| {
+        write_value_with_header::<_, TARGET, _>(&hdr, val, out)
+    })
+}
+
+/// Serializes any NBT value in big-endian format with an empty root name (`""`).
+#[inline]
+pub fn write_to_vec_be<'a>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_to_vec::<byteorder::BigEndian>(value)
+}
+
+/// Serializes any NBT value in little-endian format with an empty root name (`""`).
+#[inline]
+pub fn write_to_vec_le<'a>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_to_vec::<byteorder::LittleEndian>(value)
+}
+
+/// Appends any NBT value with an empty root name (`""`) into an existing [`Vec<u8>`].
+#[inline]
+pub fn write_into<'a, TARGET: ByteOrder>(value: impl AsValueRef<'a>, out: &mut Vec<u8>) {
+    let val = value.as_value_ref();
+    let hdr = [val.tag_id() as u8, 0, 0];
+    let Ok(()) = write_value_with_header::<_, TARGET, _>(&hdr, val, out);
+}
+
+/// Appends any NBT value in big-endian format with an empty root name (`""`) into `out`.
+#[inline]
+pub fn write_into_be<'a>(value: impl AsValueRef<'a>, out: &mut Vec<u8>) {
+    write_into::<byteorder::BigEndian>(value, out);
+}
+
+/// Appends any NBT value in little-endian format with an empty root name (`""`) into `out`.
+#[inline]
+pub fn write_into_le<'a>(value: impl AsValueRef<'a>, out: &mut Vec<u8>) {
+    write_into::<byteorder::LittleEndian>(value, out);
+}
+
+/// Writes any NBT value with an empty root name (`""`) to a [`Write`] stream.
+#[inline]
+pub fn write_to<'a, TARGET: ByteOrder>(
+    value: impl AsValueRef<'a>,
+    writer: impl Write,
+) -> Result<()> {
+    let val = value.as_value_ref();
+    let hdr = [val.tag_id() as u8, 0, 0];
+    write_value_with_header::<_, TARGET, _>(&hdr, val, &mut IoSink(writer))
+}
+
+/// Writes any NBT value in big-endian format with an empty root name (`""`) to `writer`.
+#[inline]
+pub fn write_to_be<'a>(value: impl AsValueRef<'a>, writer: impl Write) -> Result<()> {
+    write_to::<byteorder::BigEndian>(value, writer)
+}
+
+/// Writes any NBT value in little-endian format with an empty root name (`""`) to `writer`.
+#[inline]
+pub fn write_to_le<'a>(value: impl AsValueRef<'a>, writer: impl Write) -> Result<()> {
+    write_to::<byteorder::LittleEndian>(value, writer)
+}
+
+/// Serializes any NBT value with the given root `name` into a new [`Vec<u8>`].
+#[inline]
+pub fn write_named_to_vec<'a, TARGET: ByteOrder>(
+    name: impl AsKey,
+    value: impl AsValueRef<'a>,
+) -> Vec<u8> {
+    let val = value.as_value_ref();
+    name.with_mutf8(|k| {
+        with_named_header::<TARGET, _>(val.tag_id(), k, |hdr| {
+            sink_to_vec(hdr.len() + value_payload_size_hint(val), |out| {
+                write_value_with_header::<_, TARGET, _>(hdr, val, out)
+            })
+        })
+    })
+}
+
+/// Serializes any NBT value in big-endian format with the given root `name`.
+#[inline]
+pub fn write_named_to_vec_be<'a>(name: impl AsKey, value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_named_to_vec::<byteorder::BigEndian>(name, value)
+}
+
+/// Serializes any NBT value in little-endian format with the given root `name`.
+#[inline]
+pub fn write_named_to_vec_le<'a>(name: impl AsKey, value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_named_to_vec::<byteorder::LittleEndian>(name, value)
+}
+
+/// Appends any NBT value with the given root `name` into an existing [`Vec<u8>`].
+#[inline]
+pub fn write_named_into<'a, TARGET: ByteOrder>(
+    name: impl AsKey,
+    value: impl AsValueRef<'a>,
+    out: &mut Vec<u8>,
+) {
+    let val = value.as_value_ref();
+    name.with_mutf8(|k| {
+        with_named_header::<TARGET, _>(val.tag_id(), k, |hdr| {
+            let Ok(()) = write_value_with_header::<_, TARGET, _>(hdr, val, out);
+        });
+    });
+}
+
+/// Writes any NBT value with the given root `name` to a [`Write`] stream.
+#[inline]
+pub fn write_named_to<'a, TARGET: ByteOrder>(
+    name: impl AsKey,
+    value: impl AsValueRef<'a>,
+    writer: impl Write,
+) -> Result<()> {
+    let val = value.as_value_ref();
+    let mut sink = IoSink(writer);
+    name.with_mutf8(|k| {
+        with_named_header::<TARGET, _>(val.tag_id(), k, |hdr| {
+            write_value_with_header::<_, TARGET, _>(hdr, val, &mut sink)
+        })
+    })
+}
+
+/// Serializes any NBT value without a root name (`[tag_id][payload]`, Minecraft 1.20.2+ network
+/// format) into a new [`Vec<u8>`].
+#[inline]
+pub fn write_nameless_to_vec<'a, TARGET: ByteOrder>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    let val = value.as_value_ref();
+    if val.tag_id() == TagID::End {
+        return vec![0];
+    }
+    let hdr = [val.tag_id() as u8];
+    sink_to_vec(1 + value_payload_size_hint(val), |out| {
+        write_value_with_header::<_, TARGET, _>(&hdr, val, out)
+    })
+}
+
+/// Serializes any NBT value in big-endian nameless format (`[tag_id][payload]`).
+#[inline]
+pub fn write_nameless_to_vec_be<'a>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_nameless_to_vec::<byteorder::BigEndian>(value)
+}
+
+/// Serializes any NBT value in little-endian nameless format (`[tag_id][payload]`).
+#[inline]
+pub fn write_nameless_to_vec_le<'a>(value: impl AsValueRef<'a>) -> Vec<u8> {
+    write_nameless_to_vec::<byteorder::LittleEndian>(value)
+}
+
+/// Appends any NBT value without a root name (`[tag_id][payload]`, Minecraft 1.20.2+ network
+/// format) into an existing [`Vec<u8>`].
+#[inline]
+pub fn write_nameless_into<'a, TARGET: ByteOrder>(value: impl AsValueRef<'a>, out: &mut Vec<u8>) {
+    let val = value.as_value_ref();
+    let hdr = [val.tag_id() as u8];
+    let Ok(()) = write_value_with_header::<_, TARGET, _>(&hdr, val, out);
+}
+
+/// Writes any NBT value without a root name (`[tag_id][payload]`, Minecraft 1.20.2+ network
+/// format) to a [`Write`] stream.
+#[inline]
+pub fn write_nameless_to<'a, TARGET: ByteOrder>(
+    value: impl AsValueRef<'a>,
+    writer: impl Write,
+) -> Result<()> {
+    let val = value.as_value_ref();
+    let hdr = [val.tag_id() as u8];
+    write_value_with_header::<_, TARGET, _>(&hdr, val, &mut IoSink(writer))
+}
+
+macro_rules! impl_inherent_write_methods {
+    () => {
+        /// Serializes this NBT value with an empty root name (`""`) into a [`Vec<u8>`].
+        #[inline]
+        pub fn write_to_vec<TARGET: crate::ByteOrder>(&self) -> Vec<u8> {
+            crate::write::write_to_vec::<TARGET>(self)
+        }
+
+        /// Serializes this NBT value in big-endian format with an empty root name (`""`).
+        #[inline]
+        pub fn write_to_vec_be(&self) -> Vec<u8> {
+            crate::write::write_to_vec_be(self)
+        }
+
+        /// Serializes this NBT value in little-endian format with an empty root name (`""`).
+        #[inline]
+        pub fn write_to_vec_le(&self) -> Vec<u8> {
+            crate::write::write_to_vec_le(self)
+        }
+
+        /// Appends this NBT value with an empty root name (`""`) into `out`.
+        #[inline]
+        pub fn write_into<TARGET: crate::ByteOrder>(&self, out: &mut Vec<u8>) {
+            crate::write::write_into::<TARGET>(self, out);
+        }
+
+        /// Appends this NBT value in big-endian format with an empty root name (`""`) into `out`.
+        #[inline]
+        pub fn write_into_be(&self, out: &mut Vec<u8>) {
+            crate::write::write_into_be(self, out);
+        }
+
+        /// Appends this NBT value in little-endian format with an empty root name (`""`) into `out`.
+        #[inline]
+        pub fn write_into_le(&self, out: &mut Vec<u8>) {
+            crate::write::write_into_le(self, out);
+        }
+
+        /// Writes this NBT value with an empty root name (`""`) to `writer`.
+        #[inline]
+        pub fn write_to<TARGET: crate::ByteOrder>(
+            &self,
+            writer: impl std::io::Write,
+        ) -> crate::Result<()> {
+            crate::write::write_to::<TARGET>(self, writer)
+        }
+
+        /// Writes this NBT value in big-endian format with an empty root name (`""`) to `writer`.
+        #[inline]
+        pub fn write_to_be(&self, writer: impl std::io::Write) -> crate::Result<()> {
+            crate::write::write_to_be(self, writer)
+        }
+
+        /// Writes this NBT value in little-endian format with an empty root name (`""`) to `writer`.
+        #[inline]
+        pub fn write_to_le(&self, writer: impl std::io::Write) -> crate::Result<()> {
+            crate::write::write_to_le(self, writer)
+        }
+
+        /// Serializes this NBT value with the given root `name` into a [`Vec<u8>`].
+        #[inline]
+        pub fn write_named_to_vec<TARGET: crate::ByteOrder>(
+            &self,
+            name: impl crate::AsKey,
+        ) -> Vec<u8> {
+            crate::write::write_named_to_vec::<TARGET>(name, self)
+        }
+
+        /// Serializes this NBT value in big-endian format with the given root `name`.
+        #[inline]
+        pub fn write_named_to_vec_be(&self, name: impl crate::AsKey) -> Vec<u8> {
+            crate::write::write_named_to_vec_be(name, self)
+        }
+
+        /// Serializes this NBT value in little-endian format with the given root `name`.
+        #[inline]
+        pub fn write_named_to_vec_le(&self, name: impl crate::AsKey) -> Vec<u8> {
+            crate::write::write_named_to_vec_le(name, self)
+        }
+
+        /// Appends this NBT value with the given root `name` into `out`.
+        #[inline]
+        pub fn write_named_into<TARGET: crate::ByteOrder>(
+            &self,
+            name: impl crate::AsKey,
+            out: &mut Vec<u8>,
+        ) {
+            crate::write::write_named_into::<TARGET>(name, self, out);
+        }
+
+        /// Writes this NBT value with the given root `name` to `writer`.
+        #[inline]
+        pub fn write_named_to<TARGET: crate::ByteOrder>(
+            &self,
+            name: impl crate::AsKey,
+            writer: impl std::io::Write,
+        ) -> crate::Result<()> {
+            crate::write::write_named_to::<TARGET>(name, self, writer)
+        }
+
+        /// Serializes this NBT value without a root name (Minecraft 1.20.2+ network format).
+        #[inline]
+        pub fn write_nameless_to_vec<TARGET: crate::ByteOrder>(&self) -> Vec<u8> {
+            crate::write::write_nameless_to_vec::<TARGET>(self)
+        }
+
+        /// Serializes this NBT value in big-endian nameless format (`[tag_id][payload]`).
+        #[inline]
+        pub fn write_nameless_to_vec_be(&self) -> Vec<u8> {
+            crate::write::write_nameless_to_vec_be(self)
+        }
+
+        /// Serializes this NBT value in little-endian nameless format (`[tag_id][payload]`).
+        #[inline]
+        pub fn write_nameless_to_vec_le(&self) -> Vec<u8> {
+            crate::write::write_nameless_to_vec_le(self)
+        }
+
+        /// Appends this NBT value without a root name into `out`.
+        #[inline]
+        pub fn write_nameless_into<TARGET: crate::ByteOrder>(&self, out: &mut Vec<u8>) {
+            crate::write::write_nameless_into::<TARGET>(self, out);
+        }
+
+        /// Writes this NBT value without a root name to `writer`.
+        #[inline]
+        pub fn write_nameless_to<TARGET: crate::ByteOrder>(
+            &self,
+            writer: impl std::io::Write,
+        ) -> crate::Result<()> {
+            crate::write::write_nameless_to::<TARGET>(self, writer)
+        }
+    };
+}
+
+pub(crate) use impl_inherent_write_methods;

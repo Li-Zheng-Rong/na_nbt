@@ -1,9 +1,9 @@
 mod parser;
 pub mod view;
 
-use std::{fmt, hint::unreachable_unchecked, io::Write, marker::PhantomData, ptr, slice};
+use std::{fmt, hint::unreachable_unchecked, marker::PhantomData, slice};
 
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian, LittleEndian};
 
 use crate::{
     cold_path,
@@ -13,28 +13,28 @@ use crate::{
         view::{read_value_advance, CompoundRef, ListRef, ValueRef},
     },
     same_byte_order,
-    write::{sink_to_vec, swap_u16, swap_u32, swap_u64, ByteSink, IoSink},
-    Borrowed, ByteOrder, MUTF8Str, Result, Source, Tag, TagID, Writable, EMPTY_COMPOUND,
-    EMPTY_LIST,
+    write::{impl_inherent_write_methods, swap_u16, swap_u32, swap_u64, ByteSink},
+    AsKey, Borrowed, ByteOrder, MUTF8Str, Result, Source, Tag, TagID, EMPTY_COMPOUND, EMPTY_LIST,
 };
+
 
 /// A zero-copy parsed NBT document backed by buffer `B` (`&[u8]`, `bytes::Bytes`, `Vec<u8>`, etc.).
 ///
 /// Small NBT documents with up to 8 `Compound`/`List` containers store their structural index
 /// inline without any heap allocation.
 #[derive(Clone)]
-pub struct Document<O: ByteOrder, B = &'static [u8]> {
-    data: B,
-    marks: SmallMarks,
-    _marker: PhantomData<fn() -> O>,
+pub struct Document<O: ByteOrder = BigEndian, B = &'static [u8]> {
+    pub(crate) data: B,
+    pub(crate) marks: SmallMarks,
+    pub(crate) _marker: PhantomData<fn() -> O>,
 }
 
 /// Zero-copy NBT document borrowing a byte slice.
-pub type BorrowedDocument<'a, O> = Document<O, &'a [u8]>;
+pub type BorrowedDocument<'a, O = BigEndian> = Document<O, &'a [u8]>;
 
 /// Zero-copy NBT document backed by [`bytes::Bytes`].
 #[cfg(feature = "shared")]
-pub type SharedDocument<O> = Document<O, bytes::Bytes>;
+pub type SharedDocument<O = BigEndian> = Document<O, bytes::Bytes>;
 
 /// Parses an NBT document from a borrowed byte slice without copying payloads.
 #[inline]
@@ -42,11 +42,57 @@ pub fn read_borrowed<'a, O: ByteOrder>(source: &'a [u8]) -> Result<BorrowedDocum
     read_document::<O, &'a [u8]>(source)
 }
 
+/// Parses a big-endian NBT document from a borrowed byte slice.
+#[inline]
+pub fn read_borrowed_be(source: &[u8]) -> Result<BorrowedDocument<'_, BigEndian>> {
+    read_document::<BigEndian, &[u8]>(source)
+}
+
+/// Parses a little-endian NBT document from a borrowed byte slice.
+#[inline]
+pub fn read_borrowed_le(source: &[u8]) -> Result<BorrowedDocument<'_, LittleEndian>> {
+    read_document::<LittleEndian, &[u8]>(source)
+}
+
+/// Parses a nameless root NBT document (`[tag_id][payload]`, Minecraft 1.20.2+ network format)
+/// from a borrowed byte slice.
+#[inline]
+pub fn read_borrowed_nameless<'a, O: ByteOrder>(
+    source: &'a [u8],
+) -> Result<BorrowedDocument<'a, O>> {
+    read_document_nameless::<O, &'a [u8]>(source)
+}
+
+/// Parses a big-endian nameless root NBT document (`[tag_id][payload]`) from a borrowed byte slice.
+#[inline]
+pub fn read_borrowed_nameless_be(source: &[u8]) -> Result<BorrowedDocument<'_, BigEndian>> {
+    read_document_nameless::<BigEndian, &[u8]>(source)
+}
+
+/// Parses a little-endian nameless root NBT document (`[tag_id][payload]`) from a borrowed byte slice.
+#[inline]
+pub fn read_borrowed_nameless_le(source: &[u8]) -> Result<BorrowedDocument<'_, LittleEndian>> {
+    read_document_nameless::<LittleEndian, &[u8]>(source)
+}
+
 /// Parses an NBT document from any buffer implementing `AsRef<[u8]>`.
 #[inline]
 pub fn read_document<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document<O, B>> {
     let mut marks = SmallMarks::new();
-    parse_marks::<O>(source.as_ref(), &mut marks)?;
+    parse_marks::<O, false>(source.as_ref(), &mut marks)?;
+    Ok(Document {
+        data: source,
+        marks,
+        _marker: PhantomData,
+    })
+}
+
+/// Parses a nameless root NBT document (`[tag_id][payload]`, Minecraft 1.20.2+ network format)
+/// from any buffer implementing `AsRef<[u8]>`.
+#[inline]
+pub fn read_document_nameless<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document<O, B>> {
+    let mut marks = SmallMarks::with_nameless(true);
+    parse_marks::<O, true>(source.as_ref(), &mut marks)?;
     Ok(Document {
         data: source,
         marks,
@@ -61,46 +107,231 @@ pub fn read_shared<O: ByteOrder>(source: bytes::Bytes) -> Result<SharedDocument<
     read_document::<O, bytes::Bytes>(source)
 }
 
+/// Parses a big-endian NBT document backed by shared [`bytes::Bytes`].
+#[cfg(feature = "shared")]
+#[inline]
+pub fn read_shared_be(source: bytes::Bytes) -> Result<SharedDocument<BigEndian>> {
+    read_document::<BigEndian, bytes::Bytes>(source)
+}
+
+/// Parses a little-endian NBT document backed by shared [`bytes::Bytes`].
+#[cfg(feature = "shared")]
+#[inline]
+pub fn read_shared_le(source: bytes::Bytes) -> Result<SharedDocument<LittleEndian>> {
+    read_document::<LittleEndian, bytes::Bytes>(source)
+}
+
+/// Parses a nameless root NBT document (`[tag_id][payload]`) backed by shared [`bytes::Bytes`].
+#[cfg(feature = "shared")]
+#[inline]
+pub fn read_shared_nameless<O: ByteOrder>(source: bytes::Bytes) -> Result<SharedDocument<O>> {
+    read_document_nameless::<O, bytes::Bytes>(source)
+}
+
+/// Parses a big-endian nameless root NBT document (`[tag_id][payload]`) backed by shared [`bytes::Bytes`].
+#[cfg(feature = "shared")]
+#[inline]
+pub fn read_shared_nameless_be(source: bytes::Bytes) -> Result<SharedDocument<BigEndian>> {
+    read_document_nameless::<BigEndian, bytes::Bytes>(source)
+}
+
+/// Parses a little-endian nameless root NBT document (`[tag_id][payload]`) backed by shared [`bytes::Bytes`].
+#[cfg(feature = "shared")]
+#[inline]
+pub fn read_shared_nameless_le(source: bytes::Bytes) -> Result<SharedDocument<LittleEndian>> {
+    read_document_nameless::<LittleEndian, bytes::Bytes>(source)
+}
+
 impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
-    /// Returns a lightweight `Copy` view of the root NBT value.
+    /// Returns the root tag's MUTF-8 name, or `None` if the document is nameless or `TAG_End`.
     #[inline]
-    pub fn root(&self) -> ValueRef<'_, Borrowed<O>> {
+    pub fn root_name(&self) -> Option<&MUTF8Str> {
+        if self.marks.mode() != 0 {
+            return None;
+        }
         let bytes = self.data.as_ref();
         unsafe {
             let src = bytes.as_ptr();
             let root_tag = *src.cast::<TagID>();
             if root_tag == TagID::End {
-                cold_path();
-                return ValueRef::End;
+                return None;
             }
             let name_len = byteorder::U16::<O>::from_bytes(*src.add(1).cast()).get() as usize;
+            Some(MUTF8Str::from_mutf8_unchecked(slice::from_raw_parts(
+                src.add(3),
+                name_len,
+            )))
+        }
+    }
+
+    /// Returns the [`TagID`] of the root value.
+    #[inline]
+    pub fn root_tag_id(&self) -> TagID {
+        let mode = self.marks.mode();
+        if (1..=12).contains(&mode) {
+            unsafe { TagID::from_u8_unchecked(mode) }
+        } else {
+            unsafe { *self.data.as_ref().as_ptr().cast::<TagID>() }
+        }
+    }
+
+    /// Returns a lightweight `Copy` view of the root NBT value.
+    #[inline]
+    pub fn root(&self) -> ValueRef<'_, Borrowed<O>> {
+        let bytes = self.data.as_ref();
+        let mode = self.marks.mode();
+        unsafe {
+            let src = bytes.as_ptr();
+            let (root_tag, hdr_len) = if (1..=12).contains(&mode) {
+                (TagID::from_u8_unchecked(mode), 0usize)
+            } else {
+                let tag = *src.cast::<TagID>();
+                if tag == TagID::End {
+                    cold_path();
+                    return ValueRef::End;
+                }
+                let hdr = if mode == 0x10 {
+                    1
+                } else {
+                    3 + byteorder::U16::<O>::from_bytes(*src.add(1).cast()).get() as usize
+                };
+                (tag, hdr)
+            };
             let mut iter = BorrowedIterCursor {
-                data: src.add(3 + name_len),
+                data: src.add(hdr_len),
                 mark: self.marks.as_ptr(),
             };
             read_value_advance::<Borrowed<O>>(root_tag, &mut iter)
         }
     }
 
+    /// Returns the root value as a [`CompoundRef`] if the root tag is `TAG_Compound`.
+    #[inline]
+    pub fn as_compound(&self) -> Option<CompoundRef<'_, Borrowed<O>>> {
+        self.root().as_compound()
+    }
+
+    /// Navigates into the root container by key or list index, returning [`ValueRef::End`] on miss.
+    #[inline]
+    pub fn at(&self, index: impl Index) -> ValueRef<'_, Borrowed<O>> {
+        self.root().at(index)
+    }
+
+    /// Looks up a child in the root container by key or list index.
     #[inline]
     pub fn get(&self, index: impl Index) -> Option<ValueRef<'_, Borrowed<O>>> {
         self.root().get(index)
     }
 
+    /// Looks up and downcasts a child in the root container to Rust tag type `T`.
     #[inline]
-    pub fn get_as<T: Tag>(&self, index: impl Index) -> Option<T::Ref<'_, Borrowed<O>>> {
+    pub fn get_as<T: ?Sized + Tag>(&self, index: impl Index) -> Option<T::Ref<'_, Borrowed<O>>> {
         self.root().get_as::<T>(index)
     }
 
+    /// Looks up a boolean (`TAG_Byte != 0`) entry in the root compound.
+    #[inline]
+    pub fn get_bool(&self, key: impl AsKey) -> Option<bool> {
+        self.as_compound()?.get_bool(key)
+    }
+
+    /// Looks up a `TAG_Byte` (`i8`) entry in the root compound.
+    #[inline]
+    pub fn get_byte(&self, key: impl AsKey) -> Option<i8> {
+        self.as_compound()?.get_byte(key)
+    }
+
+    /// Looks up a `TAG_Short` (`i16`) entry in the root compound.
+    #[inline]
+    pub fn get_short(&self, key: impl AsKey) -> Option<i16> {
+        self.as_compound()?.get_short(key)
+    }
+
+    /// Looks up a `TAG_Int` (`i32`) entry in the root compound.
+    #[inline]
+    pub fn get_int(&self, key: impl AsKey) -> Option<i32> {
+        self.as_compound()?.get_int(key)
+    }
+
+    /// Looks up a `TAG_Long` (`i64`) entry in the root compound.
+    #[inline]
+    pub fn get_long(&self, key: impl AsKey) -> Option<i64> {
+        self.as_compound()?.get_long(key)
+    }
+
+    /// Looks up a `TAG_Float` (`f32`) entry in the root compound.
+    #[inline]
+    pub fn get_float(&self, key: impl AsKey) -> Option<f32> {
+        self.as_compound()?.get_float(key)
+    }
+
+    /// Looks up a `TAG_Double` (`f64`) entry in the root compound.
+    #[inline]
+    pub fn get_double(&self, key: impl AsKey) -> Option<f64> {
+        self.as_compound()?.get_double(key)
+    }
+
+    /// Looks up a zero-copy `TAG_String` (`&MUTF8Str`) entry in the root compound.
+    #[inline]
+    pub fn get_string(&self, key: impl AsKey) -> Option<&MUTF8Str> {
+        self.as_compound()?.get_string(key)
+    }
+
+    /// Looks up a `TAG_String` entry in the root compound and decodes it to UTF-8 (`Cow<str>`).
+    #[inline]
+    pub fn get_str(&self, key: impl AsKey) -> Option<std::borrow::Cow<'_, str>> {
+        self.get_string(key).map(MUTF8Str::decode_lossy)
+    }
+
+    /// Looks up a `TAG_Byte_Array` (`&[i8]`) entry in the root compound.
+    #[inline]
+    pub fn get_byte_array(&self, key: impl AsKey) -> Option<&[i8]> {
+        self.as_compound()?.get_byte_array(key)
+    }
+
+    /// Looks up a `TAG_Int_Array` entry in the root compound.
+    #[inline]
+    pub fn get_int_array(&self, key: impl AsKey) -> Option<&[byteorder::I32<O>]> {
+        self.as_compound()?.get_int_array(key)
+    }
+
+    /// Looks up a `TAG_Long_Array` entry in the root compound.
+    #[inline]
+    pub fn get_long_array(&self, key: impl AsKey) -> Option<&[byteorder::I64<O>]> {
+        self.as_compound()?.get_long_array(key)
+    }
+
+    /// Looks up a `TAG_List` entry in the root compound.
+    #[inline]
+    pub fn get_list(&self, key: impl AsKey) -> Option<ListRef<'_, Borrowed<O>>> {
+        self.as_compound()?.get_list(key)
+    }
+
+    /// Looks up a `TAG_Compound` entry in the root compound.
+    #[inline]
+    pub fn get_compound(&self, key: impl AsKey) -> Option<CompoundRef<'_, Borrowed<O>>> {
+        self.as_compound()?.get_compound(key)
+    }
+
+    /// Converts the root value into an owned [`Value`](crate::Value).
+    #[inline]
+    pub fn to_owned_value<TARGET: ByteOrder>(&self) -> crate::Value<TARGET> {
+        self.root().to_owned_value::<TARGET>()
+    }
+
+    /// Returns the raw underlying NBT byte slice.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.data.as_ref()
     }
 
+    /// Consumes the document and returns the backing buffer `B`.
     #[inline]
     pub fn into_inner(self) -> B {
         self.data
     }
+
+    impl_inherent_write_methods!();
 }
 
 impl<O: ByteOrder, B: AsRef<[u8]>> fmt::Debug for Document<O, B> {
@@ -109,15 +340,26 @@ impl<O: ByteOrder, B: AsRef<[u8]>> fmt::Debug for Document<O, B> {
     }
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> Writable for Document<O, B> {
+impl<O: ByteOrder, B1: AsRef<[u8]>, B2: AsRef<[u8]>> PartialEq<Document<O, B2>>
+    for Document<O, B1>
+{
     #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        self.root().write_to_vec::<TARGET>()
+    fn eq(&self, other: &Document<O, B2>) -> bool {
+        self.root() == other.root()
     }
+}
 
+impl<O: ByteOrder, B: AsRef<[u8]>, S: Source> PartialEq<ValueRef<'_, S>> for Document<O, B> {
     #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        self.root().write_to_writer::<TARGET>(writer)
+    fn eq(&self, other: &ValueRef<'_, S>) -> bool {
+        self.root() == *other
+    }
+}
+
+impl<O: ByteOrder, B: AsRef<[u8]>> PartialEq<crate::Value<O>> for Document<O, B> {
+    #[inline]
+    fn eq(&self, other: &crate::Value<O>) -> bool {
+        self.root() == other.as_ref()
     }
 }
 
@@ -181,7 +423,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     fn empty_compound<'a>() -> Self::CompoundCursor<'a> {
         BorrowedCursor {
             data: &EMPTY_COMPOUND,
-            mark: ptr::null(),
+            mark: std::ptr::null(),
         }
     }
 
@@ -189,7 +431,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     fn empty_list<'a>() -> Self::ListCursor<'a> {
         BorrowedCursor {
             data: &EMPTY_LIST,
-            mark: ptr::null(),
+            mark: std::ptr::null(),
         }
     }
 
@@ -197,7 +439,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     fn empty_iter() -> Self::IterCursor {
         BorrowedIterCursor {
             data: EMPTY_COMPOUND.as_ptr(),
-            mark: ptr::null(),
+            mark: std::ptr::null(),
         }
     }
 
@@ -283,6 +525,11 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     }
 
     #[inline(always)]
+    unsafe fn list_primitive_ptr(cursor: Self::ListCursor<'_>) -> *const u8 {
+        unsafe { cursor.data.as_ptr().add(5) }
+    }
+
+    #[inline(always)]
     unsafe fn list_to_iter(cursor: Self::ListCursor<'_>) -> Self::IterCursor {
         BorrowedIterCursor {
             data: unsafe { cursor.data.as_ptr().add(5) },
@@ -308,46 +555,46 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         index: usize,
         elem_size: usize,
     ) -> Self::IterCursor {
-        let mut p = unsafe { cursor.data.as_ptr().add(5) };
         unsafe {
+            let mut ptr = cursor.data.as_ptr().add(5);
             for _ in 0..index {
-                let len = byteorder::U32::<O>::from_bytes(*p.cast()).get() as usize;
-                p = p.add(4 + len * elem_size);
+                let len = byteorder::U32::<O>::from_bytes(*ptr.cast()).get() as usize;
+                ptr = ptr.add(4 + len * elem_size);
             }
-        }
-        BorrowedIterCursor {
-            data: p,
-            mark: cursor.mark,
+            BorrowedIterCursor {
+                data: ptr,
+                mark: cursor.mark,
+            }
         }
     }
 
     #[inline]
     unsafe fn list_seek_string(cursor: Self::ListCursor<'_>, index: usize) -> Self::IterCursor {
-        let mut p = unsafe { cursor.data.as_ptr().add(5) };
         unsafe {
+            let mut ptr = cursor.data.as_ptr().add(5);
             for _ in 0..index {
-                let len = byteorder::U16::<O>::from_bytes(*p.cast()).get() as usize;
-                p = p.add(2 + len);
+                let len = byteorder::U16::<O>::from_bytes(*ptr.cast()).get() as usize;
+                ptr = ptr.add(2 + len);
             }
-        }
-        BorrowedIterCursor {
-            data: p,
-            mark: cursor.mark,
+            BorrowedIterCursor {
+                data: ptr,
+                mark: cursor.mark,
+            }
         }
     }
 
     #[inline]
     unsafe fn list_seek_composite(cursor: Self::ListCursor<'_>, index: usize) -> Self::IterCursor {
-        let mut p = unsafe { cursor.data.as_ptr().add(5) };
-        let mut m = cursor.mark;
         unsafe {
+            let mut ptr = cursor.data.as_ptr().add(5);
+            let mut mark = cursor.mark;
             for _ in 0..index {
-                let cur = *m;
-                p = p.add(cur.byte_len as usize);
-                m = m.add(cur.flat_next_mark as usize);
+                let m = *mark;
+                ptr = ptr.add(m.byte_len as usize);
+                mark = mark.add(m.flat_next_mark as usize);
             }
+            BorrowedIterCursor { data: ptr, mark }
         }
-        BorrowedIterCursor { data: p, mark: m }
     }
 
     #[inline]
@@ -357,14 +604,21 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         index: usize,
     ) -> Self::IterCursor {
         unsafe {
-            if tag_id.is_primitive() {
-                Self::list_seek_primitive(cursor, index, TagID::elem_size_raw(tag_id as u8))
-            } else if tag_id.is_array() {
-                Self::list_seek_array(cursor, index, TagID::elem_size_raw(tag_id as u8))
-            } else if tag_id.is_composite() {
-                Self::list_seek_composite(cursor, index)
-            } else {
-                Self::list_seek_string(cursor, index)
+            match tag_id {
+                TagID::End
+                | TagID::Byte
+                | TagID::Short
+                | TagID::Int
+                | TagID::Long
+                | TagID::Float
+                | TagID::Double => {
+                    Self::list_seek_primitive(cursor, index, TagID::elem_size_raw(tag_id as u8))
+                }
+                TagID::ByteArray | TagID::IntArray | TagID::LongArray => {
+                    Self::list_seek_array(cursor, index, TagID::elem_size_raw(tag_id as u8))
+                }
+                TagID::String => Self::list_seek_string(cursor, index),
+                TagID::List | TagID::Compound => Self::list_seek_composite(cursor, index),
             }
         }
     }
@@ -452,62 +706,46 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         }
     }
 
-    fn write_compound_to_vec<TARGET: ByteOrder>(cursor: Self::CompoundCursor<'_>) -> Vec<u8> {
-        let hdr = [TagID::Compound as u8, 0, 0];
-        sink_to_vec(3 + cursor.data.len(), |out| {
-            if const { same_byte_order::<O, TARGET>() } {
-                out.write_2(&hdr, cursor.data)
-            } else {
-                out.write_bytes(&hdr)?;
-                let written =
-                    unsafe { write_compound_swapped::<O, TARGET, _>(cursor.data.as_ptr(), out)? };
-                debug_assert_eq!(written, cursor.data.len());
-                Ok(())
-            }
-        })
+    #[inline(always)]
+    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
+        cursor.data.len()
     }
 
-    fn write_compound_to_writer<TARGET: ByteOrder>(
+    #[inline(always)]
+    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
+        cursor.data.len()
+    }
+
+    #[inline]
+    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()> {
-        let hdr = [TagID::Compound as u8, 0, 0];
-        let mut sink = IoSink(writer);
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error> {
         if const { same_byte_order::<O, TARGET>() } {
-            sink.write_2(&hdr, cursor.data)
+            sink.write_2(hdr, cursor.data)
         } else {
-            sink.write_bytes(&hdr)?;
-            unsafe { write_compound_swapped::<O, TARGET, _>(cursor.data.as_ptr(), &mut sink)? };
+            sink.write_bytes(hdr)?;
+            let written =
+                unsafe { write_compound_swapped::<O, TARGET, _>(cursor.data.as_ptr(), sink)? };
+            debug_assert_eq!(written, cursor.data.len());
             Ok(())
         }
     }
 
-    fn write_list_to_vec<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> Vec<u8> {
-        let hdr = [TagID::List as u8, 0, 0];
-        sink_to_vec(3 + cursor.data.len(), |out| {
-            if const { same_byte_order::<O, TARGET>() } {
-                out.write_2(&hdr, cursor.data)
-            } else {
-                out.write_bytes(&hdr)?;
-                let written =
-                    unsafe { write_list_swapped::<O, TARGET, _>(cursor.data.as_ptr(), out)? };
-                debug_assert_eq!(written, cursor.data.len());
-                Ok(())
-            }
-        })
-    }
-
-    fn write_list_to_writer<TARGET: ByteOrder>(
+    #[inline]
+    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::ListCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()> {
-        let hdr = [TagID::List as u8, 0, 0];
-        let mut sink = IoSink(writer);
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error> {
         if const { same_byte_order::<O, TARGET>() } {
-            sink.write_2(&hdr, cursor.data)
+            sink.write_2(hdr, cursor.data)
         } else {
-            sink.write_bytes(&hdr)?;
-            unsafe { write_list_swapped::<O, TARGET, _>(cursor.data.as_ptr(), &mut sink)? };
+            sink.write_bytes(hdr)?;
+            let written =
+                unsafe { write_list_swapped::<O, TARGET, _>(cursor.data.as_ptr(), sink)? };
+            debug_assert_eq!(written, cursor.data.len());
             Ok(())
         }
     }

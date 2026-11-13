@@ -1924,20 +1924,20 @@ fn test_zero_copy_borrowed_str_and_bytes() {
 
 #[test]
 fn test_native_nbt_with_explicit_markers() {
-    use na_nbt::{BigEndian, CompoundOwn, TypedListOwn, Writable};
+    use na_nbt::{BigEndian, Compound, TypedList};
 
     // Build native NBT including a List<Compound> whose first entry has an empty-string key ""
     // (ensuring zero ambiguity with wrapped lists).
-    let mut root = CompoundOwn::<BigEndian>::default();
+    let mut root = Compound::<BigEndian>::default();
     root.insert("bytes", [1i8, -2, 3, 127]);
-    let mut compounds = TypedListOwn::<BigEndian, na_nbt::tag::Compound>::default();
-    let mut c0 = CompoundOwn::<BigEndian>::default();
+    let mut compounds = TypedList::<Compound, BigEndian>::default();
+    let mut c0 = Compound::<BigEndian>::default();
     c0.insert("", 99i32);
     c0.insert("k", 1i32);
     compounds.push(c0);
     root.insert("compounds", compounds);
 
-    let nbt_bytes = root.write_to_vec::<BigEndian>();
+    let nbt_bytes = root.write_to_vec_be();
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct NativeTarget {

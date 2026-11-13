@@ -119,62 +119,65 @@ pub struct ItemDisplay {
 }
 
 fn na_nbt_items_from_nbt<'s>(nbt: impl AsValueRef<'s>) -> Option<Vec<Option<Item>>> {
-    use na_nbt::tag::*;
     let nbt = nbt.as_value_ref();
     let mut items = Vec::new();
-    for item_nbt in nbt.get_as::<TypedList<Compound>>("i").unwrap_or_default() {
-        if item_nbt.get_as::<Short>("id").is_none() {
+    for item_nbt in nbt
+        .get_list("i")
+        .and_then(|l| l.compounds())
+        .unwrap_or_default()
+    {
+        let Some(id) = item_nbt.get_short("id") else {
             items.push(None);
             continue;
-        }
+        };
 
-        let item_tag = item_nbt.get_as::<Compound>("tag")?;
-        let item_extra_attributes = item_tag
-            .get_as::<Compound>("ExtraAttributes")
-            .unwrap_or_default();
-        let item_display = item_tag.get_as::<Compound>("display").unwrap_or_default();
+        let item_tag = item_nbt.get_compound("tag")?;
+        let item_extra_attributes = item_tag.get_compound("ExtraAttributes");
+        let item_display = item_tag.get_compound("display");
 
         items.push(Some(Item {
-            id: item_nbt.get_as::<Short>("id")?,
-            damage: item_nbt.get_as::<Short>("Damage")?,
-            count: item_nbt.get_as::<Byte>("Count")?,
+            id,
+            damage: item_nbt.get_short("Damage")?,
+            count: item_nbt.get_byte("Count")?,
 
             head_texture_id: item_tag
-                .get("SkullOwner")
-                .and_then(|skull_owner| skull_owner.get_as::<Compound>("Properties"))
-                .and_then(|props| props.get_as::<TypedList<Compound>>("textures"))
-                .and_then(|textures| textures.get(0))
-                .and_then(|texture| texture.get_as::<String>("Value"))
+                .at("SkullOwner")
+                .at("Properties")
+                .at("textures")
+                .at(0)
+                .at("Value")
+                .as_string()
                 .map(|s| s.to_utf8_string()),
             skyblock_id: item_extra_attributes
-                .get_as::<String>("id")
+                .and_then(|e| e.get_string("id"))
                 .map(|id| id.to_utf8_string()),
             reforge: item_extra_attributes
-                .get_as::<String>("modifier")
+                .and_then(|e| e.get_string("modifier"))
                 .map(|id| id.to_utf8_string()),
 
             display: ItemDisplay {
                 name: item_display
-                    .get_as::<String>("Name")
+                    .and_then(|d| d.get_string("Name"))
                     .map(|n| n.to_utf8_string())
                     .unwrap_or_default(),
                 lore: item_display
-                    .get_as::<TypedList<String>>("Lore")
-                    .map(|l| l.into_iter().map(|s| s.to_utf8_string()).collect())
+                    .and_then(|d| d.get_list("Lore"))
+                    .and_then(|l| l.strings())
+                    .map(|l| l.iter().map(|s| s.to_utf8_string()).collect())
                     .unwrap_or_default(),
-                color: item_display.get_as::<Int>("color"),
-                has_glint: item_extra_attributes.get("ench").is_some(),
+                color: item_display.and_then(|d| d.get_int("color")),
+                has_glint: item_extra_attributes.is_some_and(|e| e.contains_key("ench")),
             },
             enchantments: item_extra_attributes
-                .get_as::<Compound>("enchantments")
+                .and_then(|e| e.get_compound("enchantments"))
                 .map(|c| {
-                    c.into_iter()
-                        .map(|(k, v)| (k.to_utf8_string(), v.as_::<Int>().unwrap_or_default()))
+                    c.iter()
+                        .map(|(k, v)| (k.to_utf8_string(), v.as_int().unwrap_or_default()))
                         .collect()
                 })
                 .unwrap_or_default(),
             timestamp: item_extra_attributes
-                .get_as::<String>("timestamp")
+                .and_then(|e| e.get_string("timestamp"))
                 .map(|t| t.to_utf8_string()),
         }));
     }

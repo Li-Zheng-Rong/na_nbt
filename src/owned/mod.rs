@@ -1,18 +1,20 @@
+//! Owned, flat-buffer mutable NBT containers ([`Value`], [`Compound`], [`List`], [`TypedList`]).
+
+/// Owned [`Compound`] map and mutable entry iterator.
 pub mod compound;
+/// Ergonomic [`IntoNBT`] payload conversions.
 pub mod into_nbt;
+/// Owned [`List`] and [`TypedList`] containers and mutable iterators.
 pub mod list;
-mod parser;
+pub(crate) mod parser;
+/// Unaligned slot storage guards ([`Mut`], [`ScalarMut`]).
 pub mod slot;
+/// Owned [`Value`] and mutable [`ValueMut`] enums.
 pub mod value;
 
-use std::{
-    hint::unreachable_unchecked,
-    io::{Read, Write},
-    marker::PhantomData,
-    slice,
-};
+use std::{hint::unreachable_unchecked, io::Read, marker::PhantomData, slice};
 
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian, LittleEndian};
 
 use crate::{
     cold_path,
@@ -24,14 +26,15 @@ use crate::{
         },
     },
     same_byte_order,
-    write::{sink_to_vec, swap_u16, swap_u32, swap_u64, ByteSink, IoSink},
-    ByteOrder, CompoundRef, Error, ListRef, MUTF8Str, Owned, Result, Source, TagID, ValueOwn,
+    write::{swap_u16, swap_u32, swap_u64, ByteSink},
+    ByteOrder, CompoundRef, Error, ListRef, MUTF8Str, Owned, Result, Source, TagID, Value,
     EMPTY_COMPOUND, EMPTY_LIST,
 };
 
-/// Parses an NBT byte slice into an owned [`ValueOwn<R>`] tree, converting from input byte order
-/// `O` to storage byte order `R`.
-pub fn read_owned<O: ByteOrder, R: ByteOrder>(source: &[u8]) -> Result<ValueOwn<R>> {
+#[inline]
+fn read_owned_impl<O: ByteOrder, R: ByteOrder, const NAMELESS: bool>(
+    source: &[u8],
+) -> Result<Value<R>> {
     if source.is_empty() {
         cold_path();
         return Err(Error::EOF);
@@ -40,27 +43,31 @@ pub fn read_owned<O: ByteOrder, R: ByteOrder>(source: &[u8]) -> Result<ValueOwn<
     let tag_id = source[0];
     if tag_id == 0 {
         return if source.len() == 1 {
-            Ok(ValueOwn::End)
+            Ok(Value::End)
         } else {
             cold_path();
             Err(Error::REMAIN(source.len() - 1))
         };
     }
 
-    if source.len() < 3 {
-        cold_path();
-        return Err(Error::EOF);
-    }
-
-    let name_len =
-        byteorder::U16::<O>::from_bytes(unsafe { *source.as_ptr().add(1).cast() }).get() as usize;
-    if source.len() < 3 + name_len {
-        cold_path();
-        return Err(Error::EOF);
-    }
+    let payload_offset = if NAMELESS {
+        1
+    } else {
+        if source.len() < 3 {
+            cold_path();
+            return Err(Error::EOF);
+        }
+        let name_len = byteorder::U16::<O>::from_bytes(unsafe { *source.as_ptr().add(1).cast() })
+            .get() as usize;
+        if source.len() < 3 + name_len {
+            cold_path();
+            return Err(Error::EOF);
+        }
+        3 + name_len
+    };
 
     unsafe {
-        let mut current = source.as_ptr().add(3 + name_len);
+        let mut current = source.as_ptr().add(payload_offset);
         let end = source.as_ptr().add(source.len());
         let val = read_unsafe::<O, R>(tag_id, &mut current, end)?;
         if current == end {
@@ -72,13 +79,73 @@ pub fn read_owned<O: ByteOrder, R: ByteOrder>(source: &[u8]) -> Result<ValueOwn<
     }
 }
 
-/// Reads all bytes from `reader` and parses them into an owned [`ValueOwn<R>`] tree.
+/// Parses a named NBT byte slice into an owned [`Value<R>`] tree, converting from input byte order
+/// `O` to storage byte order `R`.
+#[inline]
+pub fn read_owned<O: ByteOrder, R: ByteOrder>(source: &[u8]) -> Result<Value<R>> {
+    read_owned_impl::<O, R, false>(source)
+}
+
+/// Parses a big-endian (Java Edition) NBT byte slice into an owned [`Value<BigEndian>`].
+#[inline]
+pub fn read_owned_be(source: &[u8]) -> Result<Value<BigEndian>> {
+    read_owned_impl::<BigEndian, BigEndian, false>(source)
+}
+
+/// Parses a little-endian (Bedrock Edition) NBT byte slice into an owned [`Value<LittleEndian>`].
+#[inline]
+pub fn read_owned_le(source: &[u8]) -> Result<Value<LittleEndian>> {
+    read_owned_impl::<LittleEndian, LittleEndian, false>(source)
+}
+
+/// Parses a nameless NBT byte slice (`[tag_id][payload]`, Minecraft 1.20.2+ network format) into
+/// an owned [`Value<R>`] tree.
+#[inline]
+pub fn read_owned_nameless<O: ByteOrder, R: ByteOrder>(source: &[u8]) -> Result<Value<R>> {
+    read_owned_impl::<O, R, true>(source)
+}
+
+/// Parses a big-endian nameless NBT byte slice (`[tag_id][payload]`) into an owned [`Value<BigEndian>`].
+#[inline]
+pub fn read_owned_nameless_be(source: &[u8]) -> Result<Value<BigEndian>> {
+    read_owned_impl::<BigEndian, BigEndian, true>(source)
+}
+
+/// Parses a little-endian nameless NBT byte slice (`[tag_id][payload]`) into an owned [`Value<LittleEndian>`].
+#[inline]
+pub fn read_owned_nameless_le(source: &[u8]) -> Result<Value<LittleEndian>> {
+    read_owned_impl::<LittleEndian, LittleEndian, true>(source)
+}
+
+/// Reads all bytes from `reader` and parses them into an owned [`Value<R>`] tree.
 pub fn read_owned_from_reader<O: ByteOrder, R: ByteOrder>(
     mut reader: impl Read,
-) -> Result<ValueOwn<R>> {
+) -> Result<Value<R>> {
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).map_err(Error::IO)?;
     read_owned::<O, R>(&buf)
+}
+
+/// Reads a big-endian (Java Edition) NBT stream from `reader` into an owned [`Value<BigEndian>`].
+#[inline]
+pub fn read_owned_from_reader_be(reader: impl Read) -> Result<Value<BigEndian>> {
+    read_owned_from_reader::<BigEndian, BigEndian>(reader)
+}
+
+/// Reads a little-endian (Bedrock Edition) NBT stream from `reader` into an owned [`Value<LittleEndian>`].
+#[inline]
+pub fn read_owned_from_reader_le(reader: impl Read) -> Result<Value<LittleEndian>> {
+    read_owned_from_reader::<LittleEndian, LittleEndian>(reader)
+}
+
+/// Reads all bytes from `reader` and parses a nameless NBT root (`[tag_id][payload]`) into an
+/// owned [`Value<R>`] tree.
+pub fn read_owned_nameless_from_reader<O: ByteOrder, R: ByteOrder>(
+    mut reader: impl Read,
+) -> Result<Value<R>> {
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).map_err(Error::IO)?;
+    read_owned_nameless::<O, R>(&buf)
 }
 
 #[doc(hidden)]
@@ -191,6 +258,11 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline(always)]
+    unsafe fn list_primitive_ptr(cursor: Self::ListCursor<'_>) -> *const u8 {
+        unsafe { cursor.ptr.add(5) }
+    }
+
+    #[inline(always)]
     unsafe fn list_to_iter(cursor: Self::ListCursor<'_>) -> Self::IterCursor {
         OwnedIterCursor(unsafe { cursor.ptr.add(5) })
     }
@@ -291,40 +363,43 @@ impl<O: ByteOrder> Source for Owned<O> {
         unsafe { slot_borrow_slice::<byteorder::I64<O>>(ptr) }
     }
 
-    fn write_compound_to_vec<TARGET: ByteOrder>(cursor: Self::CompoundCursor<'_>) -> Vec<u8> {
-        sink_to_vec(1 + 2 + 128, |out| unsafe {
-            out.write_bytes(&[TagID::Compound as u8, 0, 0])?;
-            write_compound_sink::<O, TARGET, _>(cursor.ptr, out)
-        })
+    #[inline(always)]
+    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
+        if unsafe { *cursor.ptr == 0 } {
+            1
+        } else {
+            128
+        }
     }
 
-    fn write_compound_to_writer<TARGET: ByteOrder>(
+    #[inline(always)]
+    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
+        let (tag_id, len) = unsafe { Self::list_header(cursor) };
+        if tag_id.is_primitive() {
+            5 + mutable_tag_size(tag_id) * len
+        } else {
+            5 + 128
+        }
+    }
+
+    #[inline]
+    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()> {
-        let mut sink = IoSink(writer);
-        unsafe {
-            sink.write_bytes(&[TagID::Compound as u8, 0, 0])?;
-            write_compound_sink::<O, TARGET, _>(cursor.ptr, &mut sink)
-        }
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error> {
+        sink.write_bytes(hdr)?;
+        unsafe { write_compound_sink::<O, TARGET, Sink>(cursor.ptr, sink) }
     }
 
-    fn write_list_to_vec<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> Vec<u8> {
-        sink_to_vec(1 + 2 + 5 + 128, |out| unsafe {
-            out.write_bytes(&[TagID::List as u8, 0, 0])?;
-            write_list_sink::<O, TARGET, _>(cursor.ptr, out)
-        })
-    }
-
-    fn write_list_to_writer<TARGET: ByteOrder>(
+    #[inline]
+    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::ListCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()> {
-        let mut sink = IoSink(writer);
-        unsafe {
-            sink.write_bytes(&[TagID::List as u8, 0, 0])?;
-            write_list_sink::<O, TARGET, _>(cursor.ptr, &mut sink)
-        }
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error> {
+        sink.write_bytes(hdr)?;
+        unsafe { write_list_sink::<O, TARGET, Sink>(cursor.ptr, sink) }
     }
 }
 

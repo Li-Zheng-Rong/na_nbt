@@ -2,7 +2,6 @@ use bytes::Bytes;
 use na_nbt::{from_slice_be, from_slice_le, to_vec_be, to_vec_le};
 use na_nbt::{
     read_borrowed, read_owned, read_owned_from_reader, read_shared, BigEndian, LittleEndian,
-    Writable,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -184,12 +183,12 @@ pub fn test_direct(data: &[u8]) {
     }
     if let Ok(root) = read_owned_from_reader::<LittleEndian, LittleEndian>(data) {
         let mut vec = Vec::new();
-        if root.write_to_writer::<LittleEndian>(&mut vec).is_ok() {
+        if root.write_to::<LittleEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<LittleEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<LittleEndian, BigEndian>(vec.as_slice()).is_ok());
         }
         let mut vec = Vec::new();
-        if root.write_to_writer::<BigEndian>(&mut vec).is_ok() {
+        if root.write_to::<BigEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<BigEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<BigEndian, BigEndian>(vec.as_slice()).is_ok());
         }
@@ -204,12 +203,12 @@ pub fn test_direct(data: &[u8]) {
     }
     if let Ok(root) = read_owned_from_reader::<LittleEndian, BigEndian>(data) {
         let mut vec = Vec::new();
-        if root.write_to_writer::<LittleEndian>(&mut vec).is_ok() {
+        if root.write_to::<LittleEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<LittleEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<LittleEndian, BigEndian>(vec.as_slice()).is_ok());
         }
         let mut vec = Vec::new();
-        if root.write_to_writer::<BigEndian>(&mut vec).is_ok() {
+        if root.write_to::<BigEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<BigEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<BigEndian, BigEndian>(vec.as_slice()).is_ok());
         }
@@ -224,12 +223,12 @@ pub fn test_direct(data: &[u8]) {
     }
     if let Ok(root) = read_owned_from_reader::<BigEndian, LittleEndian>(data) {
         let mut vec = Vec::new();
-        if root.write_to_writer::<BigEndian>(&mut vec).is_ok() {
+        if root.write_to::<BigEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<BigEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<BigEndian, BigEndian>(vec.as_slice()).is_ok());
         }
         let mut vec = Vec::new();
-        if root.write_to_writer::<LittleEndian>(&mut vec).is_ok() {
+        if root.write_to::<LittleEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<LittleEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<LittleEndian, BigEndian>(vec.as_slice()).is_ok());
         }
@@ -244,12 +243,12 @@ pub fn test_direct(data: &[u8]) {
     }
     if let Ok(root) = read_owned_from_reader::<BigEndian, BigEndian>(data) {
         let mut vec = Vec::new();
-        if root.write_to_writer::<BigEndian>(&mut vec).is_ok() {
+        if root.write_to::<BigEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<BigEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<BigEndian, BigEndian>(vec.as_slice()).is_ok());
         }
         let mut vec = Vec::new();
-        if root.write_to_writer::<LittleEndian>(&mut vec).is_ok() {
+        if root.write_to::<LittleEndian>(&mut vec).is_ok() {
             assert!(read_owned_from_reader::<LittleEndian, LittleEndian>(vec.as_slice()).is_ok());
             assert!(read_owned_from_reader::<LittleEndian, BigEndian>(vec.as_slice()).is_ok());
         }

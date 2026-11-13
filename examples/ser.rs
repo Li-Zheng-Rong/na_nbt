@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use na_nbt::{from_slice_be, read_borrowed, to_vec_be, AsValueRef, ValueRef};
+use na_nbt::{from_slice_be, read_borrowed_be, to_vec_be, AsValueRef, ValueRef};
 use serde::{Deserialize, Serialize};
-use zerocopy::BigEndian;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Player {
@@ -104,7 +103,7 @@ fn main() {
         map: HashMap::from([("apple".to_string(), 1), ("banana".to_string(), 2)]),
     };
     let serialized = to_vec_be(&player).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
 
     let deserialized: Player = from_slice_be(&serialized).unwrap();
@@ -116,7 +115,7 @@ fn main() {
         health: 100,
     };
     let serialized = to_vec_be(&data).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -124,7 +123,7 @@ fn main() {
 
     let empty = Data::Empty;
     let serialized = to_vec_be(&empty).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -132,7 +131,7 @@ fn main() {
 
     let value = Data::Value(100);
     let serialized = to_vec_be(&value).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -140,7 +139,7 @@ fn main() {
 
     let point = Data::Point(100, 200);
     let serialized = to_vec_be(&point).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -148,7 +147,7 @@ fn main() {
 
     let byte_array = Data::ByteArray(vec![1, 2, 3, 4, 5]);
     let serialized = to_vec_be(&byte_array).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -156,7 +155,7 @@ fn main() {
 
     let int_array = Data::IntArray(vec![1, 2, 3, 4, 5]);
     let serialized = to_vec_be(&int_array).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
@@ -164,14 +163,14 @@ fn main() {
 
     let long_array = Data::LongArray(vec![1, 2, 3, 4, 5]);
     let serialized = to_vec_be(&long_array).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: Data = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));
     println!("{:#?}", deserialized);
 
     let serialized = to_vec_be(&()).unwrap();
-    let doc = read_borrowed::<BigEndian>(&serialized).unwrap();
+    let doc = read_borrowed_be(&serialized).unwrap();
     let root = doc.root();
     let deserialized: () = from_slice_be(&serialized).unwrap();
     println!("{}", dump(root));

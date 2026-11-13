@@ -1,7 +1,6 @@
 use std::{
     fmt,
     hint::assert_unchecked,
-    io::Write,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
@@ -11,8 +10,8 @@ use std::{
 use zerocopy::{byteorder, NativeEndian};
 
 use crate::{
-    same_byte_order, ByteOrder, CompoundOwn, ElementTag, ListOwn, MUTF8Str, MUTF8String, Result,
-    TagID, TypedListOwn, Writable, EMPTY_COMPOUND, EMPTY_LIST,
+    same_byte_order, ByteOrder, Compound, ElementTag, List, MUTF8Str, MUTF8String, TagID,
+    TypedList, EMPTY_COMPOUND, EMPTY_LIST,
 };
 
 pub(crate) const SIZE_DYN: usize = mem::size_of::<Vec<u8>>();
@@ -31,7 +30,7 @@ mod private {
     pub trait Sealed {}
 }
 
-/// Sealed trait for heap-backed NBT container/array types stored in unaligned 24-byte slots.
+/// Sealed trait for heap-backed NBT container and array types stored in unaligned 24-byte slots.
 pub trait SlotValue: private::Sealed + Sized {
     #[doc(hidden)]
     fn empty_placeholder() -> Self;
@@ -53,27 +52,27 @@ impl SlotValue for MUTF8String {
     }
 }
 
-impl<O: ByteOrder> private::Sealed for CompoundOwn<O> {}
-impl<O: ByteOrder> SlotValue for CompoundOwn<O> {
+impl<O: ByteOrder> private::Sealed for Compound<O> {}
+impl<O: ByteOrder> SlotValue for Compound<O> {
     #[inline(always)]
     fn empty_placeholder() -> Self {
-        CompoundOwn::new()
+        Compound::new()
     }
 }
 
-impl<O: ByteOrder> private::Sealed for ListOwn<O> {}
-impl<O: ByteOrder> SlotValue for ListOwn<O> {
+impl<O: ByteOrder> private::Sealed for List<O> {}
+impl<O: ByteOrder> SlotValue for List<O> {
     #[inline(always)]
     fn empty_placeholder() -> Self {
-        ListOwn::new()
+        List::new()
     }
 }
 
-impl<O: ByteOrder, T: ElementTag> private::Sealed for TypedListOwn<O, T> {}
-impl<O: ByteOrder, T: ElementTag> SlotValue for TypedListOwn<O, T> {
+impl<T: ?Sized + ElementTag, O: ByteOrder> private::Sealed for TypedList<T, O> {}
+impl<T: ?Sized + ElementTag, O: ByteOrder> SlotValue for TypedList<T, O> {
     #[inline(always)]
     fn empty_placeholder() -> Self {
-        TypedListOwn::new()
+        TypedList::new()
     }
 }
 
@@ -143,8 +142,8 @@ pub(crate) unsafe fn drop_compound_entries<O: ByteOrder>(mut ptr: *mut u8, end: 
             match tag_id {
                 TagID::ByteArray => drop(slot_read::<Vec<i8>>(ptr)),
                 TagID::String => drop(slot_read::<MUTF8String>(ptr)),
-                TagID::List => drop(slot_read::<ListOwn<O>>(ptr)),
-                TagID::Compound => drop(slot_read::<CompoundOwn<O>>(ptr)),
+                TagID::List => drop(slot_read::<List<O>>(ptr)),
+                TagID::Compound => drop(slot_read::<Compound<O>>(ptr)),
                 TagID::IntArray => drop(slot_read::<Vec<byteorder::I32<O>>>(ptr)),
                 TagID::LongArray => drop(slot_read::<Vec<byteorder::I64<O>>>(ptr)),
                 _ => {}
@@ -169,8 +168,8 @@ pub(crate) unsafe fn drop_list_elements<O: ByteOrder>(tag_id: TagID, ptr: *mut u
         match tag_id {
             TagID::ByteArray => drop_slots::<Vec<i8>>(ptr, count),
             TagID::String => drop_slots::<MUTF8String>(ptr, count),
-            TagID::List => drop_slots::<ListOwn<O>>(ptr, count),
-            TagID::Compound => drop_slots::<CompoundOwn<O>>(ptr, count),
+            TagID::List => drop_slots::<List<O>>(ptr, count),
+            TagID::Compound => drop_slots::<Compound<O>>(ptr, count),
             TagID::IntArray => drop_slots::<Vec<byteorder::I32<O>>>(ptr, count),
             TagID::LongArray => drop_slots::<Vec<byteorder::I64<O>>>(ptr, count),
             _ => {}
@@ -178,10 +177,10 @@ pub(crate) unsafe fn drop_list_elements<O: ByteOrder>(tag_id: TagID, ptr: *mut u
     }
 }
 
-/// RAII mutable borrow guard for a dynamic NBT value (`CompoundOwn`, `ListOwn`, `Vec`, `MUTF8String`)
-/// stored in an unaligned 24-byte slot.
+/// RAII mutable borrow guard for a dynamic NBT value ([`Compound`], [`List`], [`TypedList`],
+/// [`Vec`], [`MUTF8String`]) stored in an unaligned 24-byte slot.
 ///
-/// Dereferences directly to `&mut T` so all standard methods on `T` are available without indirection.
+/// Dereferences directly to `&mut T` so all methods on `T` are available without indirection.
 pub struct Mut<'a, T: SlotValue> {
     value: ManuallyDrop<T>,
     slot: *mut u8,
@@ -215,14 +214,14 @@ impl<'a, T: SlotValue> Mut<'a, T> {
     }
 }
 
-impl<'a, O: ByteOrder> Mut<'a, ListOwn<O>> {
-    /// Attempts to convert this mutable list guard into a [`TypedListOwn<O, T>`] guard.
+impl<'a, O: ByteOrder> Mut<'a, List<O>> {
+    /// Attempts to convert this mutable list guard into a [`TypedList<T, O>`] guard.
     ///
     /// Succeeds if `self.element_is::<T>()` (either matching element tag or empty list).
     #[inline]
-    pub fn into_typed<T: ElementTag>(
+    pub fn into_typed<T: ?Sized + ElementTag>(
         self,
-    ) -> core::result::Result<Mut<'a, TypedListOwn<O, T>>, Self> {
+    ) -> core::result::Result<Mut<'a, TypedList<T, O>>, Self> {
         if !self.element_is::<T>() {
             return Err(self);
         }
@@ -283,18 +282,6 @@ impl<T: SlotValue + PartialEq<U>, U> PartialEq<U> for Mut<'_, T> {
     }
 }
 
-impl<T: SlotValue + Writable> Writable for Mut<'_, T> {
-    #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        (**self).write_to_vec::<TARGET>()
-    }
-
-    #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        (**self).write_to_writer::<TARGET>(writer)
-    }
-}
-
 /// Sealed trait for multi-byte NBT scalars (`i16`, `i32`, `i64`, `f32`, `f64`).
 pub trait Scalar: private::Sealed + Copy + Send + Sync + 'static {
     #[doc(hidden)]
@@ -331,7 +318,7 @@ impl_scalar!(f32, u32, f32::from_bits, f32::to_bits);
 impl_scalar!(f64, u64, f64::from_bits, f64::to_bits);
 
 /// RAII mutable borrow guard for a multi-byte NBT scalar (`i16`, `i32`, `i64`, `f32`, `f64`),
-/// transparently handling unaligned storage and byte-order conversion.
+/// transparently handling unaligned storage and byte-order conversion on drop.
 pub struct ScalarMut<'a, T: Scalar> {
     value: T,
     slot: *mut u8,
@@ -364,11 +351,13 @@ impl<'a, T: Scalar> ScalarMut<'a, T> {
         }
     }
 
+    /// Reads the current scalar value.
     #[inline(always)]
     pub fn get(&self) -> T {
         self.value
     }
 
+    /// Replaces the scalar value (flushed back to the underlying buffer on drop).
     #[inline(always)]
     pub fn set(&mut self, value: T) {
         self.value = value;
@@ -414,17 +403,5 @@ impl<T: Scalar + PartialEq<U>, U> PartialEq<U> for ScalarMut<'_, T> {
     #[inline]
     fn eq(&self, other: &U) -> bool {
         self.value.eq(other)
-    }
-}
-
-impl<T: Scalar + Writable> Writable for ScalarMut<'_, T> {
-    #[inline]
-    fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
-        self.value.write_to_vec::<TARGET>()
-    }
-
-    #[inline]
-    fn write_to_writer<TARGET: ByteOrder>(&self, writer: impl Write) -> Result<()> {
-        self.value.write_to_writer::<TARGET>(writer)
     }
 }

@@ -1,31 +1,41 @@
-use na_nbt::{read_borrowed, tag, AsValueRef, ByteOrder, CompoundOwn, TypedListOwn, ValueRef, BE};
+use na_nbt::{
+    read_borrowed_be, AsValueRef, ByteOrder, Compound, ListKind, TypedList, Value, ValueRef, BE,
+};
 use serde::{Deserialize, Serialize};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = include_bytes!("../fuzz/in/level");
-    let nbt = read_borrowed::<BE>(data)?;
-    let str = dump(&nbt, 0);
-    println!("{str}");
+    let doc = read_borrowed_be(data)?;
+    println!(
+        "LevelName via at(): {:?}",
+        doc.at("Data").at("LevelName").as_str()
+    );
+    println!("{}", dump(&doc, 0));
 
-    let mut owned = CompoundOwn::<BE>::new();
+    let mut owned = Compound::<BE>::new();
     populate_example(&mut owned);
-    // The exact same function also mutates nested `Mut<'_, CompoundOwn<BE>>` guards via DerefMut:
-    if let Some(mut sub) = owned.get_mut_as::<tag::Compound>("Compound") {
+    // The exact same function also mutates nested `Mut<'_, Compound<BE>>` guards via DerefMut:
+    if let Some(mut sub) = owned.get_compound_mut("Compound") {
         populate_example(&mut sub);
     }
-    println!("{}", dump(&na_nbt::ValueOwn::Compound(owned), 0));
+    if let Some(list) = owned.get_list("List") {
+        if let ListKind::Int(ints) = list.typed() {
+            println!("Typed int list len = {}", ints.len());
+        }
+    }
+    println!("{}", dump(&Value::Compound(owned), 0));
 
     an_address()?;
     Ok(())
 }
 
-fn populate_example<O: ByteOrder>(nbt: &mut CompoundOwn<O>) {
-    let mut comp = CompoundOwn::default();
+fn populate_example<O: ByteOrder>(nbt: &mut Compound<O>) {
+    let mut comp = Compound::default();
     comp.insert("Int", 1);
     comp.insert("String", "2");
     comp.insert("ByteArray", [1i8, 2, 3]);
     nbt.insert("Compound", comp);
-    let mut list = TypedListOwn::default();
+    let mut list = TypedList::<i32, O>::default();
     list.push(1);
     list.push(2);
     list.push(3);
@@ -84,8 +94,8 @@ fn an_address() -> na_nbt::Result<()> {
         city: "London".to_owned(),
     };
 
-    let j = na_nbt::to_vec_be(&address)?;
-    let addr: Address = na_nbt::from_slice_be(&j)?;
+    let bytes = na_nbt::to_vec_be(&address)?;
+    let addr: Address = na_nbt::from_slice_be(&bytes)?;
     assert_eq!(addr, address);
 
     Ok(())

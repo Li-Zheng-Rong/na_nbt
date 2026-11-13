@@ -1,3 +1,5 @@
+//! Error and result types for NBT parsing, mutation, and serialization.
+
 use std::fmt::{self, Display};
 
 use crate::TagID;
@@ -17,6 +19,7 @@ use crate::TagID;
 /// ```
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors returned during NBT parsing, serialization, or deserialization.
 #[derive(Debug)]
 pub enum Error {
     /// A custom error message from serde.
@@ -38,6 +41,7 @@ pub enum Error {
     /// ends before the string content.
     EOF,
 
+    /// Unconsumed trailing bytes remained after the root NBT value ended.
     REMAIN(usize),
 
     /// An invalid NBT tag type was encountered.
@@ -50,7 +54,7 @@ pub enum Error {
     /// A list, array or name length exceeds the maximum.
     ///
     /// NBT list lengths are stored as signed 32-bit integers,
-    /// and na_nbt trait them as `u32`.
+    /// and na_nbt treats them as `u32`.
     /// So the length cannot exceed `u32::MAX` (4,294,967,295) elements.
     LEN(usize),
 
@@ -62,7 +66,9 @@ pub enum Error {
 
     /// A tag type mismatch occurred.
     MISMATCH {
+        /// Expected NBT tag type.
         expected: TagID,
+        /// Actual NBT tag type encountered in the input.
         actual: TagID,
     },
 

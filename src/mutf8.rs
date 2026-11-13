@@ -146,6 +146,8 @@ pub(crate) fn with_mutf8_key<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R 
     }
 }
 
+/// Marker trait for wire byte order ([`BigEndian`](zerocopy::BigEndian) or
+/// [`LittleEndian`](zerocopy::LittleEndian)).
 pub trait ByteOrder: zerocopy::ByteOrder + Send + Sync + 'static {}
 
 impl<T: zerocopy::ByteOrder + Send + Sync + 'static> ByteOrder for T {}
@@ -228,16 +230,19 @@ impl MUTF8Str {
         unsafe { mem::transmute(bytes) }
     }
 
+    /// Returns the raw MUTF-8 bytes of this string slice.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
+    /// Returns the byte length of the encoded MUTF-8 slice.
     #[inline]
     pub const fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if the encoded byte length is zero.
     #[inline]
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -310,11 +315,13 @@ impl MUTF8Str {
 pub struct MUTF8String(pub(crate) Vec<u8>);
 
 impl MUTF8String {
+    /// Creates an empty `MUTF8String` without heap allocation.
     #[inline]
     pub const fn new() -> Self {
         Self(Vec::new())
     }
 
+    /// Creates an empty `MUTF8String` with pre-allocated byte capacity.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self(Vec::with_capacity(capacity))
@@ -335,37 +342,44 @@ impl MUTF8String {
         Self(bytes.to_vec())
     }
 
+    /// Borrows this string as a [`&MUTF8Str`](MUTF8Str) slice.
     #[inline]
     pub fn as_mutf8_str(&self) -> &MUTF8Str {
         unsafe { MUTF8Str::from_mutf8_unchecked(&self.0) }
     }
 
+    /// Consumes this string and returns the underlying MUTF-8 byte vector.
     #[inline]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
 
+    /// Clears the string, removing all contents while retaining allocated capacity.
     #[inline]
     pub fn clear(&mut self) {
         self.0.clear();
     }
 
+    /// Reserves capacity for at least `additional` more MUTF-8 bytes.
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.0.reserve(additional);
     }
 
+    /// Appends a single Unicode character encoded as MUTF-8.
     #[inline]
     pub fn push(&mut self, ch: char) {
         let mut buf = [0u8; 4];
         self.push_str(ch.encode_utf8(&mut buf));
     }
 
+    /// Encodes a UTF-8 `&str` as MUTF-8 and appends it to this string.
     #[inline]
     pub fn push_str(&mut self, s: &str) {
         self.0.extend_from_slice(&encode_mutf8(s));
     }
 
+    /// Appends an already-encoded [`&MUTF8Str`](MUTF8Str) directly.
     #[inline]
     pub fn push_mutf8(&mut self, s: &MUTF8Str) {
         self.0.extend_from_slice(s.as_bytes());
@@ -455,7 +469,7 @@ impl From<Cow<'_, str>> for MUTF8String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{read_borrowed, read_owned, tag, BigEndian, CompoundOwn, Writable};
+    use crate::{read_borrowed, read_owned, BigEndian, Compound};
 
     fn assert_decode_parity(bytes: &[u8]) {
         let m = unsafe { MUTF8Str::from_mutf8_unchecked(bytes) };
@@ -623,14 +637,14 @@ mod tests {
         s_mutf8.push_str("_tail\0🚀");
         assert_eq!(&*s_mutf8.decode_strict().unwrap(), "null\0emoji🎉_tail\0🚀");
 
-        let mut root = CompoundOwn::<BigEndian>::new();
+        let mut root = Compound::<BigEndian>::new();
         root.insert("ascii_key", "ascii_val");
         root.insert("key\0with\0null", "val\0with\0null");
         root.insert("emoji🎉key_long_enough_for_16b", String::from("emoji🎉val"));
 
         assert_eq!(
             &*root
-                .get_as::<tag::String>("ascii_key")
+                .get_string("ascii_key")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -638,7 +652,7 @@ mod tests {
         );
         assert_eq!(
             &*root
-                .get_as::<tag::String>("key\0with\0null")
+                .get_string("key\0with\0null")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -646,7 +660,7 @@ mod tests {
         );
         assert_eq!(
             &*root
-                .get_as::<tag::String>("emoji🎉key_long_enough_for_16b")
+                .get_string("emoji🎉key_long_enough_for_16b")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -656,11 +670,12 @@ mod tests {
         let bytes = root.write_to_vec::<BigEndian>();
         let doc = read_borrowed::<BigEndian>(&bytes).unwrap();
         let doc_root = doc.root();
-        let doc_compound = doc_root.as_::<tag::Compound>().unwrap();
+        let doc_compound = doc_root.as_compound().unwrap();
         assert!(doc_compound.get("ascii_key").is_some());
         assert_eq!(
             &*doc_root
-                .get_as::<tag::String>("key\0with\0null")
+                .at("key\0with\0null")
+                .as_string()
                 .unwrap()
                 .decode_strict()
                 .unwrap(),
@@ -668,21 +683,22 @@ mod tests {
         );
         assert_eq!(
             &*doc_root
-                .get_as::<tag::String>("emoji🎉key_long_enough_for_16b")
+                .at("emoji🎉key_long_enough_for_16b")
+                .as_string()
                 .unwrap()
                 .decode_lossy(),
             "emoji🎉val"
         );
 
         let mut owned_doc = read_owned::<BigEndian, BigEndian>(&bytes).unwrap();
-        let mut owned_root = owned_doc.as_mut_::<tag::Compound>().unwrap();
-        if let Some(mut s_mut) = owned_root.get_mut_as::<tag::String>("key\0with\0null") {
+        let owned_root = owned_doc.as_compound_mut().unwrap();
+        if let Some(mut s_mut) = owned_root.get_string_mut("key\0with\0null") {
             assert_eq!(&*s_mut.decode_strict().unwrap(), "val\0with\0null");
             s_mut.push_str("!");
         }
         assert_eq!(
             &*owned_root
-                .get_as::<tag::String>("key\0with\0null")
+                .get_string("key\0with\0null")
                 .unwrap()
                 .decode_strict()
                 .unwrap(),

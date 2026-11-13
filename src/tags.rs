@@ -1,12 +1,13 @@
-use std::{hint::assert_unchecked, io::Write, marker::PhantomData, ptr};
+use std::{hint::assert_unchecked, marker::PhantomData, ptr};
 
-use zerocopy::byteorder;
+use zerocopy::{byteorder, BigEndian};
 
 use crate::{
     cold_path,
     owned::slot::{slot_list_ptr, slot_read, slot_write, SIZE_DYN},
-    ByteOrder, CompoundOwn, CompoundRef, Error, ListOwn, ListRef, MUTF8Str, MUTF8String, Mut,
-    Result, ScalarMut, TypedListOwn, TypedListRef, ValueMut, ValueOwn, ValueRef,
+    write::ByteSink,
+    ByteOrder, Compound, CompoundRef, Error, List, ListRef, MUTF8Str, MUTF8String, Mut, Result,
+    ScalarMut, TypedList, TypedListRef, Value, ValueMut, ValueRef,
 };
 
 const TAG_ELEM_SIZES: [u8; 13] = [0, 1, 2, 4, 8, 4, 8, 1, 0, 0, 0, 4, 8];
@@ -15,18 +16,31 @@ const TAG_ELEM_SIZES: [u8; 13] = [0, 1, 2, 4, 8, 4, 8, 1, 0, 0, 0, 4, 8];
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum TagID {
+    /// `TAG_End` (`0`): marks the end of a compound tag or an empty document/list.
     End = 0,
+    /// `TAG_Byte` (`1`): signed 8-bit integer (`i8`).
     Byte = 1,
+    /// `TAG_Short` (`2`): signed 16-bit integer (`i16`).
     Short = 2,
+    /// `TAG_Int` (`3`): signed 32-bit integer (`i32`).
     Int = 3,
+    /// `TAG_Long` (`4`): signed 64-bit integer (`i64`).
     Long = 4,
+    /// `TAG_Float` (`5`): 32-bit IEEE-754 float (`f32`).
     Float = 5,
+    /// `TAG_Double` (`6`): 64-bit IEEE-754 float (`f64`).
     Double = 6,
+    /// `TAG_Byte_Array` (`7`): length-prefixed array of signed 8-bit integers (`[i8]`).
     ByteArray = 7,
+    /// `TAG_String` (`8`): length-prefixed MUTF-8 string (`MUTF8Str`).
     String = 8,
+    /// `TAG_List` (`9`): homogeneous length-prefixed list of payloads.
     List = 9,
+    /// `TAG_Compound` (`10`): map of MUTF-8 named tags terminated by `TAG_End`.
     Compound = 10,
+    /// `TAG_Int_Array` (`11`): length-prefixed array of signed 32-bit integers (`[i32]`).
     IntArray = 11,
+    /// `TAG_Long_Array` (`12`): length-prefixed array of signed 64-bit integers (`[i64]`).
     LongArray = 12,
 }
 
@@ -42,6 +56,7 @@ impl TagID {
         TAG_ELEM_SIZES[tag_id as usize] as usize
     }
 
+    /// Converts a raw byte (`0..=12`) into a [`TagID`], returning [`Error::INVALID`] otherwise.
     #[inline]
     pub const fn from_u8(value: u8) -> Result<Self> {
         match value {
@@ -65,6 +80,7 @@ impl TagID {
         }
     }
 
+    /// Returns `true` if this tag is [`TagID::End`].
     #[inline]
     pub const fn is_end(self) -> bool {
         matches!(self, Self::End)
@@ -113,7 +129,7 @@ mod private {
 }
 
 /// Zero-copy borrowed document source marker for [`ValueRef`], [`CompoundRef`], and [`ListRef`].
-pub struct Borrowed<O: ByteOrder>(PhantomData<fn() -> O>);
+pub struct Borrowed<O: ByteOrder = BigEndian>(PhantomData<fn() -> O>);
 
 impl<O: ByteOrder> private::SealedSource for Borrowed<O> {}
 impl<O: ByteOrder> Copy for Borrowed<O> {}
@@ -125,7 +141,7 @@ impl<O: ByteOrder> Clone for Borrowed<O> {
 }
 
 /// Owned DOM source marker for [`ValueRef`], [`CompoundRef`], and [`ListRef`].
-pub struct Owned<O: ByteOrder>(PhantomData<fn() -> O>);
+pub struct Owned<O: ByteOrder = BigEndian>(PhantomData<fn() -> O>);
 
 impl<O: ByteOrder> private::SealedSource for Owned<O> {}
 impl<O: ByteOrder> Copy for Owned<O> {}
@@ -138,6 +154,7 @@ impl<O: ByteOrder> Clone for Owned<O> {
 
 /// Backing storage marker for read-only NBT views ([`Borrowed<O>`] or [`Owned<O>`]).
 pub trait Source: private::SealedSource + Copy + Clone + Send + Sync + Sized + 'static {
+    /// Wire byte order used by multi-byte integers and floats in this source.
     type Order: ByteOrder;
 
     #[doc(hidden)]
@@ -168,6 +185,8 @@ pub trait Source: private::SealedSource + Copy + Clone + Send + Sync + Sized + '
 
     #[doc(hidden)]
     unsafe fn list_header(cursor: Self::ListCursor<'_>) -> (TagID, usize);
+    #[doc(hidden)]
+    unsafe fn list_primitive_ptr(cursor: Self::ListCursor<'_>) -> *const u8;
     #[doc(hidden)]
     unsafe fn list_to_iter(cursor: Self::ListCursor<'_>) -> Self::IterCursor;
     #[doc(hidden)]
@@ -213,71 +232,34 @@ pub trait Source: private::SealedSource + Copy + Clone + Send + Sync + Sized + '
     ) -> &'a [byteorder::I64<Self::Order>];
 
     #[doc(hidden)]
-    fn write_compound_to_vec<TARGET: ByteOrder>(cursor: Self::CompoundCursor<'_>) -> Vec<u8>;
+    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize;
     #[doc(hidden)]
-    fn write_compound_to_writer<TARGET: ByteOrder>(
+    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize;
+    #[doc(hidden)]
+    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()>;
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error>;
     #[doc(hidden)]
-    fn write_list_to_vec<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> Vec<u8>;
-    #[doc(hidden)]
-    fn write_list_to_writer<TARGET: ByteOrder>(
+    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+        hdr: &[u8],
         cursor: Self::ListCursor<'_>,
-        writer: impl Write,
-    ) -> Result<()>;
+        sink: &mut Sink,
+    ) -> core::result::Result<(), Sink::Error>;
 }
 
-/// Compile-time marker types for NBT tags.
-pub mod tag {
-    use std::marker::PhantomData;
-
-    use super::ElementTag;
-
-    #[derive(Clone, Copy, Debug)]
-    pub struct End;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Byte;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Short;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Int;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Long;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Float;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Double;
-    #[derive(Clone, Copy, Debug)]
-    pub struct ByteArray;
-    #[derive(Clone, Copy, Debug)]
-    pub struct String;
-    #[derive(Clone, Copy, Debug)]
-    pub struct List;
-    #[derive(Clone, Copy, Debug)]
-    pub struct Compound;
-    #[derive(Clone, Copy, Debug)]
-    pub struct IntArray;
-    #[derive(Clone, Copy, Debug)]
-    pub struct LongArray;
-
-    #[derive(Debug)]
-    pub struct TypedList<T: ElementTag>(PhantomData<fn() -> T>);
-
-    impl<T: ElementTag> Copy for TypedList<T> {}
-    impl<T: ElementTag> Clone for TypedList<T> {
-        #[inline(always)]
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-}
-
-/// Compile-time NBT tag descriptor (all 13 concrete tags plus [`tag::TypedList<T>`]).
-pub trait Tag: private::SealedTag + Copy + Clone + Send + Sync + 'static {
+/// Compile-time NBT tag mapping implemented directly for Rust types (`i8`, `i16`, `i32`, `i64`,
+/// `f32`, `f64`, `[i8]`, `str` / [`MUTF8Str`], `[i32]`, `[i64]`, [`Compound`], [`List`], and
+/// [`TypedList<T>`]).
+pub trait Tag: private::SealedTag + 'static {
+    /// Wire [`TagID`] corresponding to this Rust type.
     const TAG_ID: TagID;
+    /// Read-only view type returned by `get_as::<T>`.
     type Ref<'a, S: Source>: Copy;
+    /// Mutable guard/reference type returned by `get_mut_as::<T>`.
     type Mut<'a, O: ByteOrder>;
+    /// Owned value type returned by `remove_as::<T>` / `into_::<T>`.
     type Own<O: ByteOrder>: Default;
 
     #[doc(hidden)]
@@ -289,14 +271,15 @@ pub trait Tag: private::SealedTag + Copy + Clone + Send + Sync + 'static {
     #[doc(hidden)]
     fn into_value_mut<'a, O: ByteOrder>(val: ValueMut<'a, O>) -> Option<Self::Mut<'a, O>>;
     #[doc(hidden)]
-    fn into_value_own<O: ByteOrder>(val: ValueOwn<O>) -> Option<Self::Own<O>>;
+    fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<Self::Own<O>>;
     #[doc(hidden)]
     unsafe fn can_take_from_slot<O: ByteOrder>(slot: *const u8) -> bool;
     #[doc(hidden)]
     unsafe fn take_own_from_slot<O: ByteOrder>(slot: *mut u8) -> Self::Own<O>;
 }
 
-/// Concrete NBT element tag (`End` through `LongArray`).
+/// Canonical NBT list/compound element tag (`()`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`,
+/// `[i8]`, `str`, `[i32]`, `[i64]`, [`List`], [`Compound`]).
 pub trait ElementTag: Tag {
     #[doc(hidden)]
     const INLINE_SIZE: usize;
@@ -316,8 +299,8 @@ pub trait ElementTag: Tag {
     unsafe fn read_own_from_slot<O: ByteOrder>(src: *const u8) -> Self::Own<O>;
 }
 
-impl private::SealedTag for tag::End {}
-impl Tag for tag::End {
+impl private::SealedTag for () {}
+impl Tag for () {
     const TAG_ID: TagID = TagID::End;
     type Ref<'a, S: Source> = ();
     type Mut<'a, O: ByteOrder> = ();
@@ -340,8 +323,8 @@ impl Tag for tag::End {
         matches!(val, ValueMut::End).then_some(())
     }
     #[inline(always)]
-    fn into_value_own<O: ByteOrder>(val: ValueOwn<O>) -> Option<()> {
-        matches!(val, ValueOwn::End).then_some(())
+    fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<()> {
+        matches!(val, Value::End).then_some(())
     }
     #[inline(always)]
     unsafe fn can_take_from_slot<O: ByteOrder>(_slot: *const u8) -> bool {
@@ -351,7 +334,7 @@ impl Tag for tag::End {
     unsafe fn take_own_from_slot<O: ByteOrder>(_slot: *mut u8) {}
 }
 
-impl ElementTag for tag::End {
+impl ElementTag for () {
     const INLINE_SIZE: usize = 0;
 
     #[inline(always)]
@@ -371,8 +354,8 @@ impl ElementTag for tag::End {
     unsafe fn read_own_from_slot<O: ByteOrder>(_src: *const u8) {}
 }
 
-impl private::SealedTag for tag::Byte {}
-impl Tag for tag::Byte {
+impl private::SealedTag for i8 {}
+impl Tag for i8 {
     const TAG_ID: TagID = TagID::Byte;
     type Ref<'a, S: Source> = i8;
     type Mut<'a, O: ByteOrder> = &'a mut i8;
@@ -401,9 +384,9 @@ impl Tag for tag::Byte {
         }
     }
     #[inline(always)]
-    fn into_value_own<O: ByteOrder>(val: ValueOwn<O>) -> Option<i8> {
+    fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<i8> {
         match val {
-            ValueOwn::Byte(v) => Some(v),
+            Value::Byte(v) => Some(v),
             _ => None,
         }
     }
@@ -417,7 +400,7 @@ impl Tag for tag::Byte {
     }
 }
 
-impl ElementTag for tag::Byte {
+impl ElementTag for i8 {
     const INLINE_SIZE: usize = 1;
 
     #[inline(always)]
@@ -446,9 +429,9 @@ impl ElementTag for tag::Byte {
 }
 
 macro_rules! impl_scalar_tag {
-    ($tag_ty:ty, $variant:ident, $prim:ty, $wrapper:ident, $size:literal) => {
-        impl private::SealedTag for $tag_ty {}
-        impl Tag for $tag_ty {
+    ($prim:ty, $variant:ident, $wrapper:ident, $size:literal) => {
+        impl private::SealedTag for $prim {}
+        impl Tag for $prim {
             const TAG_ID: TagID = TagID::$variant;
             type Ref<'a, S: Source> = $prim;
             type Mut<'a, O: ByteOrder> = ScalarMut<'a, $prim>;
@@ -481,9 +464,9 @@ macro_rules! impl_scalar_tag {
                 }
             }
             #[inline(always)]
-            fn into_value_own<O: ByteOrder>(val: ValueOwn<O>) -> Option<$prim> {
+            fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<$prim> {
                 match val {
-                    ValueOwn::$variant(v) => Some(v),
+                    Value::$variant(v) => Some(v),
                     _ => None,
                 }
             }
@@ -497,7 +480,7 @@ macro_rules! impl_scalar_tag {
             }
         }
 
-        impl ElementTag for $tag_ty {
+        impl ElementTag for $prim {
             const INLINE_SIZE: usize = $size;
 
             #[inline(always)]
@@ -533,14 +516,15 @@ macro_rules! impl_scalar_tag {
     };
 }
 
-impl_scalar_tag!(tag::Short, Short, i16, I16, 2);
-impl_scalar_tag!(tag::Int, Int, i32, I32, 4);
-impl_scalar_tag!(tag::Long, Long, i64, I64, 8);
-impl_scalar_tag!(tag::Float, Float, f32, F32, 4);
-impl_scalar_tag!(tag::Double, Double, f64, F64, 8);
+impl_scalar_tag!(i16, Short, I16, 2);
+impl_scalar_tag!(i32, Int, I32, 4);
+impl_scalar_tag!(i64, Long, I64, 8);
+impl_scalar_tag!(f32, Float, F32, 4);
+impl_scalar_tag!(f64, Double, F64, 8);
 
 macro_rules! impl_dyn_tag {
     (
+        [$($generics:tt)*]
         $tag_ty:ty,
         $variant:ident,
         ref($lt:lifetime, $src:ident): $ref_ty:ty,
@@ -548,16 +532,16 @@ macro_rules! impl_dyn_tag {
         read_ref($iter:ident): $read_ref_expr:expr,
         seek_list($cur:ident, $idx:ident): $seek_expr:expr $(,)?
     ) => {
-        impl private::SealedTag for $tag_ty {}
-        impl Tag for $tag_ty {
+        impl<$($generics)*> private::SealedTag for $tag_ty {}
+        impl<$($generics)*> Tag for $tag_ty {
             const TAG_ID: TagID = TagID::$variant;
             type Ref<$lt, $src: Source> = $ref_ty;
             type Mut<'a, $ord: ByteOrder> = Mut<'a, $own_ty>;
             type Own<$ord: ByteOrder> = $own_ty;
 
             #[inline(always)]
-            unsafe fn read_ref<$lt, $src: Source>(iter: &mut $src::IterCursor) -> Option<$ref_ty> {
-                Some(unsafe { Self::read_elem_ref::<$src>(iter) })
+            unsafe fn read_ref<$lt, $src: Source>($iter: &mut $src::IterCursor) -> Option<$ref_ty> {
+                Some(unsafe { $read_ref_expr })
             }
             #[inline(always)]
             fn from_value_ref<$lt, $src: Source>(val: ValueRef<$lt, $src>) -> Option<$ref_ty> {
@@ -568,7 +552,7 @@ macro_rules! impl_dyn_tag {
             }
             #[inline(always)]
             unsafe fn read_mut<'a, $ord: ByteOrder>(slot: *mut u8) -> Option<Mut<'a, $own_ty>> {
-                Some(unsafe { Self::read_elem_mut::<$ord>(slot) })
+                Some(unsafe { Mut::from_slot(slot) })
             }
             #[inline(always)]
             fn into_value_mut<'a, $ord: ByteOrder>(
@@ -580,9 +564,9 @@ macro_rules! impl_dyn_tag {
                 }
             }
             #[inline(always)]
-            fn into_value_own<$ord: ByteOrder>(val: ValueOwn<$ord>) -> Option<$own_ty> {
+            fn into_value_own<$ord: ByteOrder>(val: Value<$ord>) -> Option<$own_ty> {
                 match val {
-                    ValueOwn::$variant(v) => Some(v),
+                    Value::$variant(v) => Some(v),
                     _ => None,
                 }
             }
@@ -592,11 +576,11 @@ macro_rules! impl_dyn_tag {
             }
             #[inline(always)]
             unsafe fn take_own_from_slot<$ord: ByteOrder>(slot: *mut u8) -> $own_ty {
-                unsafe { Self::read_own_from_slot::<$ord>(slot) }
+                unsafe { slot_read(slot) }
             }
         }
 
-        impl ElementTag for $tag_ty {
+        impl<$($generics)*> ElementTag for $tag_ty {
             const INLINE_SIZE: usize = SIZE_DYN;
 
             #[inline(always)]
@@ -627,7 +611,8 @@ macro_rules! impl_dyn_tag {
 }
 
 impl_dyn_tag!(
-    tag::ByteArray,
+    []
+    [i8],
     ByteArray,
     ref('a, S): &'a [i8],
     own(O): Vec<i8>,
@@ -636,7 +621,8 @@ impl_dyn_tag!(
 );
 
 impl_dyn_tag!(
-    tag::String,
+    []
+    str,
     String,
     ref('a, S): &'a MUTF8Str,
     own(O): MUTF8String,
@@ -645,25 +631,28 @@ impl_dyn_tag!(
 );
 
 impl_dyn_tag!(
-    tag::List,
+    [AnyO: ByteOrder]
+    List<AnyO>,
     List,
     ref('a, S): ListRef<'a, S>,
-    own(O): ListOwn<O>,
+    own(O): List<O>,
     read_ref(iter): S::read_list_advance(iter),
     seek_list(cur, idx): S::list_seek_composite(cur, idx),
 );
 
 impl_dyn_tag!(
-    tag::Compound,
+    [AnyO: ByteOrder]
+    Compound<AnyO>,
     Compound,
     ref('a, S): CompoundRef<'a, S>,
-    own(O): CompoundOwn<O>,
+    own(O): Compound<O>,
     read_ref(iter): S::read_compound_advance(iter),
     seek_list(cur, idx): S::list_seek_composite(cur, idx),
 );
 
 impl_dyn_tag!(
-    tag::IntArray,
+    []
+    [i32],
     IntArray,
     ref('a, S): &'a [byteorder::I32<S::Order>],
     own(O): Vec<byteorder::I32<O>>,
@@ -672,7 +661,8 @@ impl_dyn_tag!(
 );
 
 impl_dyn_tag!(
-    tag::LongArray,
+    []
+    [i64],
     LongArray,
     ref('a, S): &'a [byteorder::I64<S::Order>],
     own(O): Vec<byteorder::I64<O>>,
@@ -680,8 +670,64 @@ impl_dyn_tag!(
     seek_list(cur, idx): S::list_seek_array(cur, idx, 8),
 );
 
+// Convenience `Tag` aliases (`MUTF8Str`, `MUTF8String`, `String`, `Vec<i8>`, endian array slices/vecs)
+// delegating to the canonical `ElementTag` without affecting `IntoNBT` type inference.
+macro_rules! impl_tag_alias {
+    ([$($generics:tt)*] $alias:ty => $canonical:ty) => {
+        impl<$($generics)*> private::SealedTag for $alias {}
+        impl<$($generics)*> Tag for $alias {
+            const TAG_ID: TagID = <$canonical as Tag>::TAG_ID;
+            type Ref<'a, S: Source> = <$canonical as Tag>::Ref<'a, S>;
+            type Mut<'a, O: ByteOrder> = <$canonical as Tag>::Mut<'a, O>;
+            type Own<O: ByteOrder> = <$canonical as Tag>::Own<O>;
+
+            #[inline(always)]
+            unsafe fn read_ref<'a, S: Source>(
+                iter: &mut S::IterCursor,
+            ) -> Option<Self::Ref<'a, S>> {
+                unsafe { <$canonical as Tag>::read_ref::<S>(iter) }
+            }
+            #[inline(always)]
+            fn from_value_ref<'a, S: Source>(val: ValueRef<'a, S>) -> Option<Self::Ref<'a, S>> {
+                <$canonical as Tag>::from_value_ref::<S>(val)
+            }
+            #[inline(always)]
+            unsafe fn read_mut<'a, O: ByteOrder>(slot: *mut u8) -> Option<Self::Mut<'a, O>> {
+                unsafe { <$canonical as Tag>::read_mut::<O>(slot) }
+            }
+            #[inline(always)]
+            fn into_value_mut<'a, O: ByteOrder>(val: ValueMut<'a, O>) -> Option<Self::Mut<'a, O>> {
+                <$canonical as Tag>::into_value_mut::<O>(val)
+            }
+            #[inline(always)]
+            fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<Self::Own<O>> {
+                <$canonical as Tag>::into_value_own::<O>(val)
+            }
+            #[inline(always)]
+            unsafe fn can_take_from_slot<O: ByteOrder>(slot: *const u8) -> bool {
+                unsafe { <$canonical as Tag>::can_take_from_slot::<O>(slot) }
+            }
+            #[inline(always)]
+            unsafe fn take_own_from_slot<O: ByteOrder>(slot: *mut u8) -> Self::Own<O> {
+                unsafe { <$canonical as Tag>::take_own_from_slot::<O>(slot) }
+            }
+        }
+    };
+}
+
+impl_tag_alias!([] MUTF8Str => str);
+impl_tag_alias!([] MUTF8String => str);
+impl_tag_alias!([] String => str);
+impl_tag_alias!([] Vec<i8> => [i8]);
+impl_tag_alias!([AnyO: ByteOrder] [byteorder::I32<AnyO>] => [i32]);
+impl_tag_alias!([AnyO: ByteOrder] Vec<byteorder::I32<AnyO>> => [i32]);
+impl_tag_alias!([] Vec<i32> => [i32]);
+impl_tag_alias!([AnyO: ByteOrder] [byteorder::I64<AnyO>] => [i64]);
+impl_tag_alias!([AnyO: ByteOrder] Vec<byteorder::I64<AnyO>> => [i64]);
+impl_tag_alias!([] Vec<i64> => [i64]);
+
 #[inline(always)]
-unsafe fn slot_list_matches_elem<O: ByteOrder, T: ElementTag>(slot: *const u8) -> bool {
+unsafe fn slot_list_matches_elem<O: ByteOrder, T: ?Sized + ElementTag>(slot: *const u8) -> bool {
     let hdr = unsafe { slot_list_ptr(slot) };
     let elem_tag = unsafe { *hdr.cast::<TagID>() };
     if elem_tag == T::TAG_ID {
@@ -691,22 +737,22 @@ unsafe fn slot_list_matches_elem<O: ByteOrder, T: ElementTag>(slot: *const u8) -
     len == 0
 }
 
-impl<T: ElementTag> private::SealedTag for tag::TypedList<T> {}
-impl<T: ElementTag> Tag for tag::TypedList<T> {
+impl<T: ?Sized + ElementTag, AnyO: ByteOrder> private::SealedTag for TypedList<T, AnyO> {}
+impl<T: ?Sized + ElementTag, AnyO: ByteOrder> Tag for TypedList<T, AnyO> {
     const TAG_ID: TagID = TagID::List;
-    type Ref<'a, S: Source> = TypedListRef<'a, S, T>;
-    type Mut<'a, O: ByteOrder> = Mut<'a, TypedListOwn<O, T>>;
-    type Own<O: ByteOrder> = TypedListOwn<O, T>;
+    type Ref<'a, S: Source> = TypedListRef<'a, T, S>;
+    type Mut<'a, O: ByteOrder> = Mut<'a, TypedList<T, O>>;
+    type Own<O: ByteOrder> = TypedList<T, O>;
 
     #[inline(always)]
     unsafe fn read_ref<'a, S: Source>(iter: &mut S::IterCursor) -> Option<Self::Ref<'a, S>> {
-        unsafe { S::read_list_advance(iter) }.typed::<T>()
+        unsafe { S::read_list_advance(iter) }.typed_as::<T>()
     }
 
     #[inline(always)]
     fn from_value_ref<'a, S: Source>(val: ValueRef<'a, S>) -> Option<Self::Ref<'a, S>> {
         match val {
-            ValueRef::List(list) => list.typed::<T>(),
+            ValueRef::List(list) => list.typed_as::<T>(),
             _ => None,
         }
     }
@@ -714,7 +760,7 @@ impl<T: ElementTag> Tag for tag::TypedList<T> {
     #[inline(always)]
     unsafe fn read_mut<'a, O: ByteOrder>(slot: *mut u8) -> Option<Self::Mut<'a, O>> {
         if unsafe { slot_list_matches_elem::<O, T>(slot) } {
-            let mut m: Mut<'a, TypedListOwn<O, T>> = unsafe { Mut::from_slot(slot) };
+            let mut m: Mut<'a, TypedList<T, O>> = unsafe { Mut::from_slot(slot) };
             m.fix_header_tag();
             Some(m)
         } else {
@@ -732,9 +778,9 @@ impl<T: ElementTag> Tag for tag::TypedList<T> {
     }
 
     #[inline(always)]
-    fn into_value_own<O: ByteOrder>(val: ValueOwn<O>) -> Option<Self::Own<O>> {
+    fn into_value_own<O: ByteOrder>(val: Value<O>) -> Option<Self::Own<O>> {
         match val {
-            ValueOwn::List(list) => list.into_typed::<T>(),
+            Value::List(list) => list.into_typed::<T>(),
             _ => None,
         }
     }
@@ -746,7 +792,7 @@ impl<T: ElementTag> Tag for tag::TypedList<T> {
 
     #[inline(always)]
     unsafe fn take_own_from_slot<O: ByteOrder>(slot: *mut u8) -> Self::Own<O> {
-        let mut tl: TypedListOwn<O, T> = unsafe { slot_read(slot) };
+        let mut tl: TypedList<T, O> = unsafe { slot_read(slot) };
         tl.fix_header_tag();
         tl
     }
