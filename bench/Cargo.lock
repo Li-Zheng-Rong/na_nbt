@@ -228,6 +228,7 @@ dependencies = [
  "bytes",
  "cesu8",
  "derive_more",
+ "serde",
  "thiserror 2.0.17",
 ]
 
@@ -424,6 +425,7 @@ dependencies = [
  "byteorder",
  "cesu8",
  "flate2",
+ "serde",
 ]
 
 [[package]]
@@ -513,6 +515,7 @@ dependencies = [
  "bytes",
  "serde",
  "simd_cesu8",
+ "typeid",
  "zerocopy",
 ]
 
@@ -932,6 +935,12 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "unicode-ident"
