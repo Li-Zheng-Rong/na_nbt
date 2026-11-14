@@ -232,6 +232,11 @@ pub trait Source: private::SealedSource + Copy + Clone + Send + Sync + Sized + '
     ) -> &'a [byteorder::I64<Self::Order>];
 
     #[doc(hidden)]
+    fn compound_to_owned<TARGET: ByteOrder>(cursor: Self::CompoundCursor<'_>) -> Compound<TARGET>;
+    #[doc(hidden)]
+    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> List<TARGET>;
+
+    #[doc(hidden)]
     fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize;
     #[doc(hidden)]
     fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize;

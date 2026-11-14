@@ -2209,8 +2209,8 @@ fn test_serde_dom_interoperability_and_hybrid_structs() {
     typed_ia.push([7i32, 8]);
 
     let mut mutf8_map = HashMap::new();
-    mutf8_map.insert(MUTF8String::from("k\0nul"), 77);
-    mutf8_map.insert(MUTF8String::from("plain"), 88);
+    mutf8_map.insert(MUTF8String::try_from("k\0nul").unwrap(), 77);
+    mutf8_map.insert(MUTF8String::try_from("plain").unwrap(), 88);
 
     let mut raw_sub = Compound::<BigEndian>::new();
     raw_sub.insert("nested_int", 999i32);
@@ -2226,8 +2226,8 @@ fn test_serde_dom_interoperability_and_hybrid_structs() {
         typed_ints: typed_ints.clone(),
         typed_strs: typed_strs.clone(),
         typed_ia: typed_ia.clone(),
-        mutf8_owned: MUTF8String::from("ascii_mutf8"),
-        mutf8_nul: MUTF8String::from("zero\0copy\0mutf8"),
+        mutf8_owned: MUTF8String::try_from("ascii_mutf8").unwrap(),
+        mutf8_nul: MUTF8String::try_from("zero\0copy\0mutf8").unwrap(),
         mutf8_map,
         raw_sub: raw_sub.clone(),
     };
@@ -2249,7 +2249,7 @@ fn test_serde_dom_interoperability_and_hybrid_structs() {
     assert!(ptr_range.contains(&target.mutf8_owned.as_bytes().as_ptr()));
     assert!(ptr_range.contains(&target.mutf8_nul.as_bytes().as_ptr()));
 
-    let nul_key = MUTF8String::from("k\0nul");
+    let nul_key = MUTF8String::try_from("k\0nul").unwrap();
     let (&borrowed_key, &val) = target
         .mutf8_map
         .get_key_value(nul_key.as_mutf8_str())

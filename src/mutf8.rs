@@ -1,10 +1,15 @@
 use std::{
     borrow::{Borrow, Cow},
-    fmt, mem,
+    fmt,
+    hint::assert_unchecked,
+    mem,
     ops::Deref,
+    str::FromStr,
 };
 
 use simd_cesu8::DecodingError;
+
+use crate::Error;
 
 #[inline(always)]
 #[cold]
@@ -30,9 +35,48 @@ fn encode_mutf8_slow(value: &str) -> Cow<'_, [u8]> {
 
 #[cold]
 #[inline(never)]
-fn with_mutf8_key_slow<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R {
-    let encoded = simd_cesu8::mutf8::encode(key);
-    f(unsafe { MUTF8Str::from_mutf8_unchecked(&encoded) })
+fn with_mutf8_key_non_short<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R {
+    if !simd_cesu8::mutf8::needs_encoded(key) {
+        f(unsafe { MUTF8Str::from_mutf8_unchecked(key.as_bytes()) })
+    } else {
+        let encoded = simd_cesu8::mutf8::encode(key);
+        f(unsafe { MUTF8Str::from_mutf8_unchecked(&encoded) })
+    }
+}
+
+/// Compares two `len`-byte keys, inlining the comparison for keys of up to 16 bytes.
+///
+/// Slice equality lowers to an out-of-line `bcmp` call, which dominates compound key lookups
+/// because NBT keys are almost always short. Overlapping fixed-width loads stay within
+/// `[0, len)` on both sides.
+///
+/// # Safety
+///
+/// `a` and `b` must each be valid for reads of `len` bytes.
+#[inline(always)]
+pub(crate) unsafe fn key_eq(a: *const u8, b: *const u8, len: usize) -> bool {
+    unsafe {
+        if len > 16 {
+            std::slice::from_raw_parts(a, len) == std::slice::from_raw_parts(b, len)
+        } else if len >= 8 {
+            let head = a.cast::<u64>().read_unaligned() ^ b.cast::<u64>().read_unaligned();
+            let tail = a.add(len - 8).cast::<u64>().read_unaligned()
+                ^ b.add(len - 8).cast::<u64>().read_unaligned();
+            (head | tail) == 0
+        } else if len >= 4 {
+            let head = a.cast::<u32>().read_unaligned() ^ b.cast::<u32>().read_unaligned();
+            let tail = a.add(len - 4).cast::<u32>().read_unaligned()
+                ^ b.add(len - 4).cast::<u32>().read_unaligned();
+            (head | tail) == 0
+        } else if len >= 2 {
+            let head = a.cast::<u16>().read_unaligned() ^ b.cast::<u16>().read_unaligned();
+            let tail = a.add(len - 2).cast::<u16>().read_unaligned()
+                ^ b.add(len - 2).cast::<u16>().read_unaligned();
+            (head | tail) == 0
+        } else {
+            len == 0 || *a == *b
+        }
+    }
 }
 
 #[inline(always)]
@@ -123,9 +167,10 @@ pub(crate) fn decode_mutf8_lossy(bytes: &[u8]) -> Cow<'_, str> {
 }
 
 #[inline(always)]
+#[cfg(feature = "serde")]
 pub(crate) fn encode_mutf8(value: &str) -> Cow<'_, [u8]> {
     let bytes = value.as_bytes();
-    if (bytes.len() <= 16 && is_non_null_ascii_short_16(bytes))
+    if (bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes))
         || !simd_cesu8::mutf8::needs_encoded(value)
     {
         Cow::Borrowed(bytes)
@@ -137,12 +182,10 @@ pub(crate) fn encode_mutf8(value: &str) -> Cow<'_, [u8]> {
 #[inline(always)]
 pub(crate) fn with_mutf8_key<R>(key: &str, f: impl FnOnce(&MUTF8Str) -> R) -> R {
     let bytes = key.as_bytes();
-    if (bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes))
-        || !simd_cesu8::mutf8::needs_encoded(key)
-    {
+    if bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes) {
         f(unsafe { MUTF8Str::from_mutf8_unchecked(bytes) })
     } else {
-        with_mutf8_key_slow(key, f)
+        with_mutf8_key_non_short(key, f)
     }
 }
 
@@ -203,12 +246,17 @@ impl fmt::Display for MUTF8Str {
     }
 }
 
+/// # Panics
+///
+/// `to_owned` panics if the slice is longer than [`MUTF8String::MAX_LEN`]; use
+/// [`MUTF8String::try_from`] to handle that case.
 impl ToOwned for MUTF8Str {
     type Owned = MUTF8String;
 
     #[inline]
+    #[track_caller]
     fn to_owned(&self) -> Self::Owned {
-        MUTF8String::from(self)
+        mutf8_or_panic(self)
     }
 }
 
@@ -309,12 +357,34 @@ impl MUTF8Str {
     }
 }
 
-/// An owned, growable MUTF-8 encoded string.
+/// An owned, growable MUTF-8 encoded string of at most [`MUTF8String::MAX_LEN`] bytes.
+///
+/// Every MUTF-8 string in NBT (compound keys, root names and `TAG_String` payloads) is stored
+/// with a `u16` length prefix, the same limit as Java's `DataOutput.writeUTF`. `MUTF8String`
+/// keeps that limit as a type invariant: every constructor and every mutating method checks the
+/// encoded length, so a value stored in an owned [`Compound`](crate::Compound) or
+/// [`List`](crate::List) can always be written without truncation.
+///
+/// Conversions from Rust strings are fallible ([`TryFrom`]); `push*` methods panic on overflow
+/// and have non-panicking `try_push*` counterparts.
 #[repr(transparent)]
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MUTF8String(pub(crate) Vec<u8>);
+pub struct MUTF8String(Vec<u8>);
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn mutf8_too_long(len: usize) -> ! {
+    panic!(
+        "MUTF-8 string too long: {len} bytes (NBT strings hold at most {} bytes)",
+        MUTF8String::MAX_LEN
+    )
+}
 
 impl MUTF8String {
+    /// Maximum encoded length in bytes (`u16::MAX`).
+    pub const MAX_LEN: usize = u16::MAX as usize;
+
     /// Creates an empty `MUTF8String` without heap allocation.
     #[inline]
     pub const fn new() -> Self {
@@ -327,25 +397,66 @@ impl MUTF8String {
         Self(Vec::with_capacity(capacity))
     }
 
-    /// Creates an owned `MUTF8String` from raw MUTF-8 bytes without validation.
+    /// Creates an owned `MUTF8String` from raw MUTF-8 bytes without validating the encoding.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bytes` is longer than [`MAX_LEN`](Self::MAX_LEN).
     ///
     /// # Safety
     ///
     /// `bytes` must contain valid MUTF-8 encoded data.
     #[inline]
+    #[track_caller]
     pub const unsafe fn from_mutf8_unchecked(bytes: Vec<u8>) -> Self {
+        assert!(
+            bytes.len() <= Self::MAX_LEN,
+            "MUTF-8 string too long (NBT strings hold at most 65535 bytes)"
+        );
         Self(bytes)
     }
 
+    /// Wraps bytes whose length is known to be in range (parsed NBT data).
     #[inline(always)]
     pub(crate) fn from_raw_slice(bytes: &[u8]) -> Self {
+        debug_assert!(bytes.len() <= Self::MAX_LEN);
         Self(bytes.to_vec())
+    }
+
+    #[inline(always)]
+    fn from_slice_checked(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() > Self::MAX_LEN {
+            cold_path();
+            return Err(Error::LEN(bytes.len()));
+        }
+        Ok(Self(bytes.to_vec()))
+    }
+
+    #[inline(always)]
+    fn from_vec_checked(bytes: Vec<u8>) -> Result<Self, Error> {
+        if bytes.len() > Self::MAX_LEN {
+            cold_path();
+            return Err(Error::LEN(bytes.len()));
+        }
+        Ok(Self(bytes))
+    }
+
+    #[inline(always)]
+    fn from_encoded(bytes: Cow<'_, [u8]>) -> Result<Self, Error> {
+        match bytes {
+            Cow::Borrowed(b) => Self::from_slice_checked(b),
+            Cow::Owned(v) => Self::from_vec_checked(v),
+        }
     }
 
     /// Borrows this string as a [`&MUTF8Str`](MUTF8Str) slice.
     #[inline]
     pub fn as_mutf8_str(&self) -> &MUTF8Str {
-        unsafe { MUTF8Str::from_mutf8_unchecked(&self.0) }
+        // SAFETY: Every constructor and mutator preserves `self.0.len() <= Self::MAX_LEN`.
+        unsafe {
+            assert_unchecked(self.0.len() <= Self::MAX_LEN);
+            MUTF8Str::from_mutf8_unchecked(&self.0)
+        }
     }
 
     /// Consumes this string and returns the underlying MUTF-8 byte vector.
@@ -366,23 +477,94 @@ impl MUTF8String {
         self.0.reserve(additional);
     }
 
-    /// Appends a single Unicode character encoded as MUTF-8.
+    /// Bytes that can still be appended before reaching [`MAX_LEN`](Self::MAX_LEN).
     #[inline]
+    pub fn remaining(&self) -> usize {
+        unsafe { assert_unchecked(self.0.len() <= Self::MAX_LEN) };
+        Self::MAX_LEN - self.0.len()
+    }
+
+    #[inline(always)]
+    fn try_extend(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len() > self.remaining() {
+            cold_path();
+            return Err(Error::LEN(self.0.len() + bytes.len()));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Appends a single Unicode character encoded as MUTF-8.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the result would exceed [`MAX_LEN`](Self::MAX_LEN) bytes.
+    #[inline]
+    #[track_caller]
     pub fn push(&mut self, ch: char) {
-        let mut buf = [0u8; 4];
-        self.push_str(ch.encode_utf8(&mut buf));
+        if let Err(Error::LEN(len)) = self.try_push(ch) {
+            mutf8_too_long(len);
+        }
     }
 
     /// Encodes a UTF-8 `&str` as MUTF-8 and appends it to this string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the result would exceed [`MAX_LEN`](Self::MAX_LEN) bytes.
     #[inline]
+    #[track_caller]
     pub fn push_str(&mut self, s: &str) {
-        self.0.extend_from_slice(&encode_mutf8(s));
+        if let Err(Error::LEN(len)) = self.try_push_str(s) {
+            mutf8_too_long(len);
+        }
     }
 
     /// Appends an already-encoded [`&MUTF8Str`](MUTF8Str) directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the result would exceed [`MAX_LEN`](Self::MAX_LEN) bytes.
     #[inline]
+    #[track_caller]
     pub fn push_mutf8(&mut self, s: &MUTF8Str) {
-        self.0.extend_from_slice(s.as_bytes());
+        if let Err(Error::LEN(len)) = self.try_push_mutf8(s) {
+            mutf8_too_long(len);
+        }
+    }
+
+    /// Like [`push`](Self::push), but returns [`Error::LEN`] (leaving `self` unchanged) instead
+    /// of panicking when the result would exceed [`MAX_LEN`](Self::MAX_LEN) bytes.
+    #[inline]
+    pub fn try_push(&mut self, ch: char) -> Result<(), Error> {
+        let code = ch as u32;
+        if code.wrapping_sub(1) < 0x7F {
+            return self.try_extend(&[code as u8]);
+        }
+        if code == 0 {
+            return self.try_extend(&[0xC0, 0x80]);
+        }
+        let mut buf = [0u8; 4];
+        self.try_push_str(ch.encode_utf8(&mut buf))
+    }
+
+    /// Like [`push_str`](Self::push_str), but returns [`Error::LEN`] (leaving `self` unchanged)
+    /// instead of panicking when the result would exceed [`MAX_LEN`](Self::MAX_LEN) bytes.
+    #[inline]
+    pub fn try_push_str(&mut self, s: &str) -> Result<(), Error> {
+        let bytes = s.as_bytes();
+        if bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes) {
+            return self.try_extend(bytes);
+        }
+        self.try_extend(&encode_mutf8(s))
+    }
+
+    /// Like [`push_mutf8`](Self::push_mutf8), but returns [`Error::LEN`] (leaving `self`
+    /// unchanged) instead of panicking when the result would exceed [`MAX_LEN`](Self::MAX_LEN)
+    /// bytes.
+    #[inline]
+    pub fn try_push_mutf8(&mut self, s: &MUTF8Str) -> Result<(), Error> {
+        self.try_extend(s.as_bytes())
     }
 }
 
@@ -428,41 +610,88 @@ impl fmt::Display for MUTF8String {
     }
 }
 
-impl From<&MUTF8Str> for MUTF8String {
+impl TryFrom<&MUTF8Str> for MUTF8String {
+    type Error = Error;
+
     #[inline]
-    fn from(s: &MUTF8Str) -> Self {
-        Self(s.as_bytes().to_vec())
+    fn try_from(s: &MUTF8Str) -> Result<Self, Error> {
+        Self::from_slice_checked(s.as_bytes())
     }
 }
 
-impl From<&str> for MUTF8String {
+impl FromStr for MUTF8String {
+    type Err = Error;
+
     #[inline]
-    fn from(s: &str) -> Self {
-        Self(encode_mutf8(s).into_owned())
+    fn from_str(s: &str) -> Result<Self, Error> {
+        Self::try_from(s)
     }
 }
 
-impl From<String> for MUTF8String {
+impl TryFrom<&str> for MUTF8String {
+    type Error = Error;
+
     #[inline]
-    fn from(s: String) -> Self {
+    fn try_from(s: &str) -> Result<Self, Error> {
         let bytes = s.as_bytes();
-        if (bytes.len() <= 16 && is_non_null_ascii_short_16(bytes))
-            || !simd_cesu8::mutf8::needs_encoded(&s)
-        {
-            Self(s.into_bytes())
-        } else {
-            Self(encode_mutf8_slow(&s).into_owned())
+        if bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes) {
+            return Ok(Self(bytes.to_vec()));
+        }
+        if !simd_cesu8::mutf8::needs_encoded(s) {
+            return Self::from_slice_checked(bytes);
+        }
+        Self::from_encoded(encode_mutf8_slow(s))
+    }
+}
+
+impl TryFrom<&String> for MUTF8String {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(s: &String) -> Result<Self, Error> {
+        Self::try_from(s.as_str())
+    }
+}
+
+impl TryFrom<String> for MUTF8String {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(s: String) -> Result<Self, Error> {
+        let bytes = s.as_bytes();
+        if bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes) {
+            return Ok(Self(s.into_bytes()));
+        }
+        if !simd_cesu8::mutf8::needs_encoded(&s) {
+            return Self::from_vec_checked(s.into_bytes());
+        }
+        Self::from_encoded(encode_mutf8_slow(&s))
+    }
+}
+
+impl TryFrom<Cow<'_, str>> for MUTF8String {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(s: Cow<'_, str>) -> Result<Self, Error> {
+        match s {
+            Cow::Borrowed(b) => Self::try_from(b),
+            Cow::Owned(o) => Self::try_from(o),
         }
     }
 }
 
-impl From<Cow<'_, str>> for MUTF8String {
-    #[inline]
-    fn from(s: Cow<'_, str>) -> Self {
-        match s {
-            Cow::Borrowed(b) => Self::from(b),
-            Cow::Owned(o) => Self::from(o),
-        }
+/// Panicking conversion used by the infallible convenience APIs (`IntoNBT`, `ToOwned`).
+#[inline(always)]
+#[track_caller]
+pub(crate) fn mutf8_or_panic<T>(value: T) -> MUTF8String
+where
+    MUTF8String: TryFrom<T, Error = Error>,
+{
+    match MUTF8String::try_from(value) {
+        Ok(s) => s,
+        Err(Error::LEN(len)) => mutf8_too_long(len),
+        Err(_) => unreachable!(),
     }
 }
 
@@ -621,14 +850,14 @@ mod tests {
     fn test_mutf8_string_zero_copy_and_compound_roundtrip() {
         let s = String::from("allocated_ascii_and_中文_\u{FFFF}");
         let orig_ptr = s.as_ptr();
-        let own = MUTF8String::from(s);
+        let own = MUTF8String::try_from(s).unwrap();
         assert_eq!(own.as_bytes().as_ptr(), orig_ptr);
         assert_eq!(
             &*own.decode_strict().unwrap(),
             "allocated_ascii_and_中文_\u{FFFF}"
         );
 
-        let mut s_mutf8 = MUTF8String::from(String::from("null\0emoji🎉"));
+        let mut s_mutf8 = MUTF8String::try_from(String::from("null\0emoji🎉")).unwrap();
         assert_eq!(
             s_mutf8.as_bytes(),
             &*simd_cesu8::mutf8::encode("null\0emoji🎉")

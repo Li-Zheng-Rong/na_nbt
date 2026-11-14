@@ -3,12 +3,17 @@ use std::{borrow::Cow, mem::ManuallyDrop, ptr, slice};
 use zerocopy::{byteorder, BigEndian};
 
 use crate::{
+    mutf8::mutf8_or_panic,
     same_byte_order,
     write::{swap_u32, swap_u64},
     ByteOrder, Compound, ElementTag, List, MUTF8Str, MUTF8String, TypedList,
 };
 
 /// Converts Rust values into owned NBT payloads with statically known [`ElementTag`].
+///
+/// String conversions (`&str`, `String`, `Cow<str>`, `&MUTF8Str`) panic if the MUTF-8 encoding
+/// is longer than [`MUTF8String::MAX_LEN`]. Convert with [`MUTF8String::try_from`] first to
+/// handle that case without panicking; a [`MUTF8String`] converts infallibly.
 pub trait IntoNBT<O: ByteOrder = BigEndian> {
     /// Canonical [`ElementTag`] (`i32`, `str`, `[i8]`, [`Compound`], [`List`], etc.) produced by `self`.
     type Tag: ?Sized + ElementTag;
@@ -105,7 +110,7 @@ macro_rules! impl_into_nbt_string {
                 type Tag = str;
                 #[inline]
                 fn into_nbt(self) -> MUTF8String {
-                    MUTF8String::from(self)
+                    mutf8_or_panic(self)
                 }
             }
         )*
@@ -118,7 +123,7 @@ impl<O: ByteOrder> IntoNBT<O> for String {
     type Tag = str;
     #[inline]
     fn into_nbt(self) -> MUTF8String {
-        MUTF8String::from(self)
+        mutf8_or_panic(self)
     }
 }
 
@@ -126,7 +131,7 @@ impl<O: ByteOrder> IntoNBT<O> for &String {
     type Tag = str;
     #[inline]
     fn into_nbt(self) -> MUTF8String {
-        MUTF8String::from(self.as_str())
+        mutf8_or_panic(self.as_str())
     }
 }
 

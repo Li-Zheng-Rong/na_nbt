@@ -17,7 +17,7 @@ use std::{hint::unreachable_unchecked, io::Read, marker::PhantomData, slice};
 use zerocopy::{byteorder, BigEndian, LittleEndian};
 
 use crate::{
-    cold_path,
+    cold_path, key_eq,
     owned::{
         parser::read_unsafe,
         slot::{
@@ -27,8 +27,8 @@ use crate::{
     },
     same_byte_order,
     write::{swap_u16, swap_u32, swap_u64, ByteSink},
-    ByteOrder, CompoundRef, Error, ListRef, MUTF8Str, Owned, Result, Source, TagID, Value,
-    EMPTY_COMPOUND, EMPTY_LIST,
+    ByteOrder, CompoundRef, Error, ListRef, MUTF8Str, MUTF8String, Owned, Result, Source, TagID,
+    Value, EMPTY_COMPOUND, EMPTY_LIST,
 };
 
 #[inline]
@@ -223,8 +223,7 @@ impl<O: ByteOrder> Source for Owned<O> {
                     return None;
                 }
                 let raw_len = *ptr.add(1).cast::<[u8; 2]>();
-                if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes
-                {
+                if raw_len == key_len_raw && key_eq(ptr.add(3), key_bytes.as_ptr(), key_len) {
                     return Some((tag_id, OwnedIterCursor(ptr.add(3 + key_len))));
                 }
                 let name_len = byteorder::U16::<O>::from_bytes(raw_len).get() as usize;
@@ -363,6 +362,31 @@ impl<O: ByteOrder> Source for Owned<O> {
         unsafe { slot_borrow_slice::<byteorder::I64<O>>(ptr) }
     }
 
+    #[inline]
+    fn compound_to_owned<TARGET: ByteOrder>(
+        cursor: Self::CompoundCursor<'_>,
+    ) -> crate::Compound<TARGET> {
+        unsafe {
+            if *cursor.ptr == 0 {
+                return crate::Compound::new();
+            }
+            let len = compound::compound_raw_len::<O>(cursor.ptr);
+            compound::clone_compound_raw::<O, TARGET>(cursor.ptr, len)
+        }
+    }
+
+    #[inline]
+    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> crate::List<TARGET> {
+        unsafe {
+            let (tag_id, len) = Self::list_header(cursor);
+            if len == 0 {
+                return crate::List::with_tag_id(tag_id);
+            }
+            let byte_len = 5 + mutable_tag_size(tag_id) * len;
+            list::clone_list_raw::<O, TARGET>(cursor.ptr, byte_len)
+        }
+    }
+
     #[inline(always)]
     fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
         if unsafe { *cursor.ptr == 0 } {
@@ -382,24 +406,44 @@ impl<O: ByteOrder> Source for Owned<O> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
         sink: &mut Sink,
     ) -> core::result::Result<(), Sink::Error> {
-        sink.write_bytes(hdr)?;
-        unsafe { write_compound_sink::<O, TARGET, Sink>(cursor.ptr, sink) }
+        unsafe {
+            if *cursor.ptr == 0 {
+                return sink.write_2(hdr, &[0]);
+            }
+            if !hdr.is_empty() {
+                sink.write_bytes(hdr)?;
+            }
+            write_compound_sink::<O, TARGET, Sink>(cursor.ptr, sink)
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::ListCursor<'_>,
         sink: &mut Sink,
     ) -> core::result::Result<(), Sink::Error> {
-        sink.write_bytes(hdr)?;
-        unsafe { write_list_sink::<O, TARGET, Sink>(cursor.ptr, sink) }
+        unsafe {
+            let data = cursor.ptr;
+            if const { same_byte_order::<O, TARGET>() } {
+                let tag_id = TagID::from_u8_unchecked(*data);
+                if tag_id.is_primitive() {
+                    let len = byteorder::U32::<O>::from_bytes(*data.add(1).cast()).get() as usize;
+                    let raw = slice::from_raw_parts(data, 5 + mutable_tag_size(tag_id) * len);
+                    return sink.write_2(hdr, raw);
+                }
+            }
+            if !hdr.is_empty() {
+                sink.write_bytes(hdr)?;
+            }
+            write_list_sink::<O, TARGET, Sink>(data, sink)
+        }
     }
 }
 
@@ -418,7 +462,7 @@ pub(crate) unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink
     let same_order = const { same_byte_order::<O, R>() };
     unsafe {
         if *data == 0 {
-            return sink.write_bytes(&[0]);
+            return sink.write_byte(0);
         }
         sink.reserve(128);
         let mut start = data;
@@ -430,9 +474,12 @@ pub(crate) unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink
             if tag_id == TagID::End {
                 if same_order {
                     let raw_len = data.byte_offset_from_unsigned(start);
+                    if raw_len == 1 {
+                        return sink.write_byte(0);
+                    }
                     return sink.write_bytes(slice::from_raw_parts(start, raw_len));
                 } else {
-                    return sink.write_bytes(&[0]);
+                    return sink.write_byte(0);
                 }
             }
 
@@ -485,31 +532,57 @@ pub(crate) unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink
             match tag_id {
                 TagID::ByteArray => {
                     let (len, bytes) = slot_raw_bytes::<i8>(data, 1);
-                    let len_hdr = byteorder::U32::<R>::new(len as u32).to_bytes();
-                    sink.write_3(prefix, &len_hdr, bytes)?;
+                    let len_hdr = array_len_hdr::<R, S>(len, sink)?;
+                    sink.write_prefixed_u32(prefix, len_hdr, bytes)?;
                 }
                 TagID::String => {
                     let (len, bytes) = slot_raw_bytes::<u8>(data, 1);
+                    debug_assert!(len <= MUTF8String::MAX_LEN);
                     let len_hdr = byteorder::U16::<R>::new(len as u16).to_bytes();
-                    sink.write_3(prefix, &len_hdr, bytes)?;
+                    sink.write_prefixed_u16(prefix, len_hdr, bytes)?;
                 }
                 TagID::List => {
-                    if !prefix.is_empty() {
-                        sink.write_bytes(prefix)?;
+                    let list_ptr = slot_list_ptr(data);
+                    if same_order {
+                        let elem_tag = TagID::from_u8_unchecked(*list_ptr);
+                        if elem_tag.is_primitive() {
+                            let len = byteorder::U32::<O>::from_bytes(*list_ptr.add(1).cast()).get()
+                                as usize;
+                            let raw = slice::from_raw_parts(
+                                list_ptr,
+                                5 + mutable_tag_size(elem_tag) * len,
+                            );
+                            sink.write_2(prefix, raw)?;
+                        } else {
+                            if !prefix.is_empty() {
+                                sink.write_bytes(prefix)?;
+                            }
+                            write_list_sink::<O, R, S>(list_ptr, sink)?;
+                        }
+                    } else {
+                        write_list_sink::<O, R, S>(list_ptr, sink)?;
                     }
-                    write_list_sink::<O, R, S>(slot_list_ptr(data), sink)?;
                 }
                 TagID::Compound => {
-                    if !prefix.is_empty() {
-                        sink.write_bytes(prefix)?;
+                    let (ptr, byte_len) = slot_vec_parts::<u8>(data);
+                    if byte_len == 0 || *ptr == 0 {
+                        if prefix.is_empty() {
+                            sink.write_byte(0)?;
+                        } else {
+                            sink.write_2(prefix, &[0])?;
+                        }
+                    } else {
+                        if !prefix.is_empty() {
+                            sink.write_bytes(prefix)?;
+                        }
+                        write_compound_sink::<O, R, S>(ptr, sink)?;
                     }
-                    write_compound_sink::<O, R, S>(slot_compound_ptr(data), sink)?;
                 }
                 TagID::IntArray => {
                     let (len, bytes) = slot_raw_bytes::<byteorder::I32<O>>(data, 4);
-                    let len_hdr = byteorder::U32::<R>::new(len as u32).to_bytes();
+                    let len_hdr = array_len_hdr::<R, S>(len, sink)?;
                     if same_order {
-                        sink.write_3(prefix, &len_hdr, bytes)?;
+                        sink.write_prefixed_u32(prefix, len_hdr, bytes)?;
                     } else {
                         sink.write_swapped_slice(
                             &len_hdr,
@@ -520,9 +593,9 @@ pub(crate) unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink
                 }
                 TagID::LongArray => {
                     let (len, bytes) = slot_raw_bytes::<byteorder::I64<O>>(data, 8);
-                    let len_hdr = byteorder::U32::<R>::new(len as u32).to_bytes();
+                    let len_hdr = array_len_hdr::<R, S>(len, sink)?;
                     if same_order {
-                        sink.write_3(prefix, &len_hdr, bytes)?;
+                        sink.write_prefixed_u32(prefix, len_hdr, bytes)?;
                     } else {
                         sink.write_swapped_slice(
                             &len_hdr,
@@ -538,6 +611,20 @@ pub(crate) unsafe fn write_compound_sink<O: ByteOrder, R: ByteOrder, S: ByteSink
             start = data;
         }
     }
+}
+
+/// `u32` length prefix of an owned array. Arrays are plain `Vec`s that can be grown past the
+/// prefix through `Mut` / `Value`, so this is the one length the writer still has to check.
+#[inline(always)]
+fn array_len_hdr<R: ByteOrder, S: ByteSink>(
+    len: usize,
+    sink: &mut S,
+) -> core::result::Result<[u8; 4], S::Error> {
+    if len > u32::MAX as usize {
+        cold_path();
+        return Err(sink.length_overflow(len));
+    }
+    Ok(byteorder::U32::<R>::new(len as u32).to_bytes())
 }
 
 pub(crate) unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
@@ -583,18 +670,20 @@ pub(crate) unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
                 sink.write_bytes(&hdr)?;
                 for _ in 0..len {
                     let (arr_len, bytes) = slot_raw_bytes::<i8>(data, 1);
-                    let len_hdr = byteorder::U32::<R>::new(arr_len as u32).to_bytes();
-                    sink.write_2(&len_hdr, bytes)?;
+                    let len_hdr = array_len_hdr::<R, S>(arr_len, sink)?;
+                    sink.write_u32_bytes(len_hdr, bytes)?;
                     data = data.add(SIZE_DYN);
                 }
                 Ok(())
             }
             TagID::String => {
+                sink.reserve(5 + len.min(4096) * 16);
                 sink.write_bytes(&hdr)?;
                 for _ in 0..len {
                     let (str_len, bytes) = slot_raw_bytes::<u8>(data, 1);
+                    debug_assert!(str_len <= MUTF8String::MAX_LEN);
                     let len_hdr = byteorder::U16::<R>::new(str_len as u16).to_bytes();
-                    sink.write_2(&len_hdr, bytes)?;
+                    sink.write_u16_bytes(len_hdr, bytes)?;
                     data = data.add(SIZE_DYN);
                 }
                 Ok(())
@@ -610,7 +699,12 @@ pub(crate) unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
             TagID::Compound => {
                 sink.write_bytes(&hdr)?;
                 for _ in 0..len {
-                    write_compound_sink::<O, R, S>(slot_compound_ptr(data), sink)?;
+                    let (ptr, byte_len) = slot_vec_parts::<u8>(data);
+                    if byte_len == 0 || *ptr == 0 {
+                        sink.write_byte(0)?;
+                    } else {
+                        write_compound_sink::<O, R, S>(ptr, sink)?;
+                    }
                     data = data.add(SIZE_DYN);
                 }
                 Ok(())
@@ -619,9 +713,9 @@ pub(crate) unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
                 sink.write_bytes(&hdr)?;
                 for _ in 0..len {
                     let (arr_len, bytes) = slot_raw_bytes::<byteorder::I32<O>>(data, 4);
-                    let len_hdr = byteorder::U32::<R>::new(arr_len as u32).to_bytes();
+                    let len_hdr = array_len_hdr::<R, S>(arr_len, sink)?;
                     if same_order {
-                        sink.write_2(&len_hdr, bytes)?;
+                        sink.write_u32_bytes(len_hdr, bytes)?;
                     } else {
                         sink.write_swapped_slice(
                             &len_hdr,
@@ -637,9 +731,9 @@ pub(crate) unsafe fn write_list_sink<O: ByteOrder, R: ByteOrder, S: ByteSink>(
                 sink.write_bytes(&hdr)?;
                 for _ in 0..len {
                     let (arr_len, bytes) = slot_raw_bytes::<byteorder::I64<O>>(data, 8);
-                    let len_hdr = byteorder::U32::<R>::new(arr_len as u32).to_bytes();
+                    let len_hdr = array_len_hdr::<R, S>(arr_len, sink)?;
                     if same_order {
-                        sink.write_2(&len_hdr, bytes)?;
+                        sink.write_u32_bytes(len_hdr, bytes)?;
                     } else {
                         sink.write_swapped_slice(
                             &len_hdr,

@@ -681,31 +681,33 @@ impl<O: ByteOrder, const N: usize> From<[i8; N]> for Value<O> {
     }
 }
 
-impl<O: ByteOrder> From<&MUTF8Str> for Value<O> {
-    #[inline]
-    fn from(v: &MUTF8Str) -> Self {
-        Self::String(MUTF8String::from(v))
-    }
+macro_rules! impl_try_from_str_value {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            /// Fails with [`Error::LEN`](crate::Error::LEN) if the MUTF-8 encoding is longer
+            /// than [`MUTF8String::MAX_LEN`].
+            impl<O: ByteOrder> TryFrom<$ty> for Value<O> {
+                type Error = crate::Error;
+
+                #[inline]
+                fn try_from(v: $ty) -> crate::Result<Self> {
+                    MUTF8String::try_from(v).map(Self::String)
+                }
+            }
+        )*
+    };
 }
 
-impl<O: ByteOrder> From<&str> for Value<O> {
-    #[inline]
-    fn from(v: &str) -> Self {
-        Self::String(MUTF8String::from(v))
-    }
-}
+impl_try_from_str_value!(&MUTF8Str, &str, &String, String, Cow<'_, str>);
 
-impl<O: ByteOrder> From<String> for Value<O> {
-    #[inline]
-    fn from(v: String) -> Self {
-        Self::String(MUTF8String::from(v))
-    }
-}
+impl<O: ByteOrder> core::str::FromStr for Value<O> {
+    type Err = crate::Error;
 
-impl<O: ByteOrder> From<Cow<'_, str>> for Value<O> {
+    /// Encodes `s` into a [`Value::String`], or returns [`Error::LEN`](crate::Error::LEN) if its
+    /// MUTF-8 encoding is longer than [`MUTF8String::MAX_LEN`].
     #[inline]
-    fn from(v: Cow<'_, str>) -> Self {
-        Self::String(MUTF8String::from(v))
+    fn from_str(s: &str) -> crate::Result<Self> {
+        Self::try_from(s)
     }
 }
 

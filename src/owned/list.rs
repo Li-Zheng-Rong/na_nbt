@@ -10,10 +10,14 @@ use zerocopy::{byteorder, BigEndian};
 use crate::{
     cold_path,
     owned::{
-        slot::{drop_list_elements, mutable_tag_size, slot_read, slot_write, SIZE_DYN},
+        compound::clone_compound_raw,
+        slot::{
+            drop_list_elements, mutable_tag_size, slot_read, slot_write, vec_copy_endian, SIZE_DYN,
+        },
         OwnedPtr,
     },
-    write::impl_inherent_write_methods,
+    same_byte_order,
+    write::{impl_inherent_write_methods, swap_u16, swap_u32, swap_u64},
     ByteOrder, Compound, ElementTag, IntoNBT, ListIter, ListKind, ListRef, MUTF8String, Owned, Tag,
     TagID, TypedListIter, TypedListRef, Value, ValueMut, ValueRef, EMPTY_LIST, EMPTY_TYPED_LISTS,
 };
@@ -366,6 +370,11 @@ impl<O: ByteOrder> List<O> {
 
     /// Appends a value if its tag matches the list's element tag (or sets the element tag if the
     /// list is currently empty). Does nothing if the list is non-empty with a different tag.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
+    /// encoded (see [`IntoNBT`]).
     #[inline]
     pub fn push<V: IntoNBT<O>>(&mut self, value: V) {
         let _ = self.try_push(value);
@@ -450,6 +459,11 @@ impl<O: ByteOrder> List<O> {
 
     /// Inserts `value` at `index` if `index <= len()` and `value`'s tag matches the list's element
     /// tag (or if the list is currently empty).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
+    /// encoded (see [`IntoNBT`]).
     #[inline]
     pub fn insert<V: IntoNBT<O>>(&mut self, index: usize, value: V) {
         let count = self.len();
@@ -581,48 +595,129 @@ impl<O: ByteOrder> Clone for List<O> {
         if self.data.is_empty() {
             return Self::new();
         }
-        let tag_id = self.element_tag_id();
-        if tag_id.is_primitive() || self.is_empty() {
-            return Self {
-                data: self.data.clone(),
+        unsafe { clone_list_raw::<O, O>(self.data.as_ptr(), self.data.len()) }
+    }
+}
+
+/// Deep-clones the non-empty list buffer (`[tag][len][elements]`) of `byte_len` bytes at `src`
+/// from byte order `O` into `TARGET`.
+pub(crate) unsafe fn clone_list_raw<O: ByteOrder, TARGET: ByteOrder>(
+    src: *const u8,
+    byte_len: usize,
+) -> List<TARGET> {
+    let same_order = const { same_byte_order::<O, TARGET>() };
+    unsafe {
+        let tag_id = *src.cast::<TagID>();
+        let count = byteorder::U32::<O>::from_bytes(*src.add(1).cast()).get() as usize;
+        if count == 0 {
+            return List::with_tag_id(tag_id);
+        }
+        if tag_id.is_primitive() {
+            if same_order {
+                return List {
+                    data: slice::from_raw_parts(src, byte_len).to_vec(),
+                    _marker: PhantomData,
+                };
+            }
+            let mut out = List {
+                data: Vec::with_capacity(byte_len),
                 _marker: PhantomData,
             };
-        }
-        let count = self.len();
-        let mut out = List {
-            data: Vec::with_capacity(self.data.len()),
-            _marker: PhantomData,
-        };
-        unsafe {
             let base = out.data.as_mut_ptr();
-            write_list_header::<O>(base, tag_id, 0);
-            out.data.set_len(5);
-
-            macro_rules! clone_elems {
-                ($ty:ty) => {{
-                    let mut src = self.data.as_ptr().add(5);
-                    let mut dst = base.add(5);
-                    for done in 0..count {
-                        let borrowed = ptr::read_unaligned(src.cast::<ManuallyDrop<$ty>>());
-                        let cloned: $ty = (&*borrowed).clone();
-                        slot_write(dst, cloned);
-                        src = src.add(SIZE_DYN);
-                        dst = dst.add(SIZE_DYN);
-                        out.data.set_len(5 + (done + 1) * SIZE_DYN);
-                        write_list_header::<O>(base, tag_id, (done + 1) as u32);
-                    }
-                }};
-            }
-
+            write_list_header::<TARGET>(base, tag_id, count as u32);
             match tag_id {
-                TagID::ByteArray => clone_elems!(Vec<i8>),
-                TagID::String => clone_elems!(MUTF8String),
-                TagID::List => clone_elems!(List<O>),
-                TagID::Compound => clone_elems!(Compound<O>),
-                TagID::IntArray => clone_elems!(Vec<byteorder::I32<O>>),
-                TagID::LongArray => clone_elems!(Vec<byteorder::I64<O>>),
+                TagID::End => {}
+                TagID::Byte => {
+                    ptr::copy_nonoverlapping(src.add(5), base.add(5), count);
+                }
+                TagID::Short => {
+                    let s = slice::from_raw_parts(src.add(5).cast::<[u8; 2]>(), count);
+                    let d = base.add(5).cast::<[u8; 2]>();
+                    for (i, &b) in s.iter().enumerate() {
+                        d.add(i).write(swap_u16::<O, TARGET>(b));
+                    }
+                }
+                TagID::Int | TagID::Float => {
+                    let s = slice::from_raw_parts(src.add(5).cast::<[u8; 4]>(), count);
+                    let d = base.add(5).cast::<[u8; 4]>();
+                    for (i, &b) in s.iter().enumerate() {
+                        d.add(i).write(swap_u32::<O, TARGET>(b));
+                    }
+                }
+                TagID::Long | TagID::Double => {
+                    let s = slice::from_raw_parts(src.add(5).cast::<[u8; 8]>(), count);
+                    let d = base.add(5).cast::<[u8; 8]>();
+                    for (i, &b) in s.iter().enumerate() {
+                        d.add(i).write(swap_u64::<O, TARGET>(b));
+                    }
+                }
                 _ => {}
             }
+            out.data.set_len(byte_len);
+            return out;
+        }
+        let mut out = List {
+            data: Vec::with_capacity(byte_len),
+            _marker: PhantomData,
+        };
+        let base = out.data.as_mut_ptr();
+        write_list_header::<TARGET>(base, tag_id, 0);
+        out.data.set_len(5);
+
+        macro_rules! clone_elems {
+            ($src_ty:ty, $clone_expr:expr) => {{
+                let mut src = src.add(5);
+                let mut dst = base.add(5);
+                for done in 0..count {
+                    let borrowed = ptr::read_unaligned(src.cast::<ManuallyDrop<$src_ty>>());
+                    let cloned = ($clone_expr)(&*borrowed);
+                    slot_write(dst, cloned);
+                    src = src.add(SIZE_DYN);
+                    dst = dst.add(SIZE_DYN);
+                    out.data.set_len(5 + (done + 1) * SIZE_DYN);
+                    write_list_header::<TARGET>(base, tag_id, (done + 1) as u32);
+                }
+            }};
+        }
+
+        match tag_id {
+            TagID::ByteArray => clone_elems!(Vec<i8>, |v: &Vec<i8>| v.clone()),
+            TagID::String => clone_elems!(MUTF8String, |v: &MUTF8String| v.clone()),
+            TagID::List => clone_elems!(List<O>, |v: &List<O>| {
+                if v.data.is_empty() {
+                    List::new()
+                } else {
+                    clone_list_raw::<O, TARGET>(v.data.as_ptr(), v.data.len())
+                }
+            }),
+            TagID::Compound => clone_elems!(Compound<O>, |v: &Compound<O>| {
+                if v.is_empty() {
+                    Compound::new()
+                } else {
+                    clone_compound_raw::<O, TARGET>(v.data.as_ptr(), v.data.len())
+                }
+            }),
+            TagID::IntArray => {
+                clone_elems!(Vec<byteorder::I32<O>>, |v: &Vec<byteorder::I32<O>>| {
+                    vec_copy_endian::<byteorder::I32<O>, byteorder::I32<TARGET>, 4>(
+                        v.as_ptr(),
+                        v.len(),
+                        same_order,
+                        swap_u32::<O, TARGET>,
+                    )
+                })
+            }
+            TagID::LongArray => {
+                clone_elems!(Vec<byteorder::I64<O>>, |v: &Vec<byteorder::I64<O>>| {
+                    vec_copy_endian::<byteorder::I64<O>, byteorder::I64<TARGET>, 8>(
+                        v.as_ptr(),
+                        v.len(),
+                        same_order,
+                        swap_u64::<O, TARGET>,
+                    )
+                })
+            }
+            _ => {}
         }
         out
     }
@@ -834,6 +929,11 @@ impl<T: ?Sized + ElementTag, O: ByteOrder> TypedList<T, O> {
     }
 
     /// Appends an element to the back of the list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
+    /// encoded (see [`IntoNBT`]).
     #[inline]
     pub fn push(&mut self, value: impl IntoNBT<O, Tag = T>) {
         let count = self.len();
@@ -861,6 +961,11 @@ impl<T: ?Sized + ElementTag, O: ByteOrder> TypedList<T, O> {
     }
 
     /// Inserts an element at `index` (`index <= len()`), shifting subsequent elements right.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
+    /// encoded (see [`IntoNBT`]).
     #[inline]
     pub fn insert(&mut self, index: usize, value: impl IntoNBT<O, Tag = T>) {
         let count = self.len();

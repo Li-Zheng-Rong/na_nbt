@@ -295,7 +295,11 @@ fn test_root_variants_deep_nesting_keys_and_overflow_bounds() {
     assert_all_modes_parity_be(&ValueRef::<Borrowed>::Long(123456789).write_to_vec_be());
     assert_all_modes_parity_be(&ValueRef::<Borrowed>::Float(3.5).write_to_vec_be());
     assert_all_modes_parity_be(&ValueRef::<Borrowed>::Double(7.25).write_to_vec_be());
-    assert_all_modes_parity_be(&Value::<BigEndian>::String("root_string".into()).write_to_vec_be());
+    assert_all_modes_parity_be(
+        &Value::<BigEndian>::try_from("root_string")
+            .unwrap()
+            .write_to_vec_be(),
+    );
     assert_all_modes_parity_be(&ValueRef::<Borrowed>::ByteArray(&[1i8, 2, 3]).write_to_vec_be());
     assert_all_modes_parity_be(
         &ValueRef::<Borrowed>::IntArray(&[byteorder::I32::<BigEndian>::new(1), 2.into()])
@@ -762,7 +766,7 @@ fn test_named_getters_mutators_at_navigation_and_askey() {
     root.insert("la", vec![100i64, 200]);
 
     // Exercise AsKey variants (String, Cow<str>, &MUTF8Str, MUTF8String, &[u8])
-    let mutf8_nul_key = MUTF8String::from("key\0with_nul");
+    let mutf8_nul_key = MUTF8String::try_from("key\0with_nul").unwrap();
     root.insert(&mutf8_nul_key, 4242i32);
     root.insert(String::from("owned_key"), 11i32);
     root.insert(Cow::Borrowed("cow_key"), 22i32);

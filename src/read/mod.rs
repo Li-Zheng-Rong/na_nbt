@@ -8,12 +8,14 @@ use zerocopy::{byteorder, BigEndian, LittleEndian};
 use crate::{
     cold_path,
     index::Index,
+    key_eq,
+    owned::parser::{read_compound, read_list},
     read::{
         parser::{parse_marks, Mark, SmallMarks},
         view::{read_value_advance, CompoundRef, ListRef, ValueRef},
     },
     same_byte_order,
-    write::{impl_inherent_write_methods, swap_u16, swap_u32, swap_u64, ByteSink},
+    write::{impl_inherent_write_common_methods, swap_u16, swap_u32, swap_u64, ByteSink},
     AsKey, Borrowed, ByteOrder, MUTF8Str, Result, Source, Tag, TagID, EMPTY_COMPOUND, EMPTY_LIST,
 };
 
@@ -170,10 +172,10 @@ impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
     #[inline]
     pub fn root_tag_id(&self) -> TagID {
         let mode = self.marks.mode();
-        if (1..=12).contains(&mode) {
-            unsafe { TagID::from_u8_unchecked(mode) }
-        } else {
+        if mode == 0 || mode == 0x10 {
             unsafe { *self.data.as_ref().as_ptr().cast::<TagID>() }
+        } else {
+            unsafe { TagID::from_u8_unchecked(mode) }
         }
     }
 
@@ -184,20 +186,23 @@ impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
         let mode = self.marks.mode();
         unsafe {
             let src = bytes.as_ptr();
-            let (root_tag, hdr_len) = if (1..=12).contains(&mode) {
-                (TagID::from_u8_unchecked(mode), 0usize)
-            } else {
+            let (root_tag, hdr_len) = if mode == 0 {
                 let tag = *src.cast::<TagID>();
                 if tag == TagID::End {
                     cold_path();
                     return ValueRef::End;
                 }
-                let hdr = if mode == 0x10 {
-                    1
-                } else {
-                    3 + byteorder::U16::<O>::from_bytes(*src.add(1).cast()).get() as usize
-                };
+                let hdr = 3 + byteorder::U16::<O>::from_bytes(*src.add(1).cast()).get() as usize;
                 (tag, hdr)
+            } else if mode == 0x10 {
+                let tag = *src.cast::<TagID>();
+                if tag == TagID::End {
+                    cold_path();
+                    return ValueRef::End;
+                }
+                (tag, 1)
+            } else {
+                (TagID::from_u8_unchecked(mode), 0usize)
             };
             let mut iter = BorrowedIterCursor {
                 data: src.add(hdr_len),
@@ -327,13 +332,165 @@ impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
         self.data.as_ref()
     }
 
+    #[inline(always)]
+    pub(crate) fn raw_root_parts(&self) -> (TagID, &[u8]) {
+        let bytes = self.data.as_ref();
+        let mode = self.marks.mode();
+        unsafe {
+            let src = bytes.as_ptr();
+            if mode == 0 {
+                let tag = *src.cast::<TagID>();
+                if tag == TagID::End {
+                    cold_path();
+                    return (TagID::End, &[]);
+                }
+                let hdr = 3 + byteorder::U16::<O>::from_bytes(*src.add(1).cast()).get() as usize;
+                std::hint::assert_unchecked(hdr <= bytes.len());
+                (tag, bytes.get_unchecked(hdr..))
+            } else if mode == 0x10 {
+                let tag = *src.cast::<TagID>();
+                if tag == TagID::End {
+                    cold_path();
+                    return (TagID::End, &[]);
+                }
+                std::hint::assert_unchecked(!bytes.is_empty());
+                (tag, bytes.get_unchecked(1..))
+            } else {
+                (TagID::from_u8_unchecked(mode), bytes)
+            }
+        }
+    }
+
     /// Consumes the document and returns the backing buffer `B`.
     #[inline]
     pub fn into_inner(self) -> B {
         self.data
     }
 
-    impl_inherent_write_methods!();
+    /// Serializes this NBT document with an empty root name (`""`) into a [`Vec<u8>`].
+    #[inline]
+    pub fn write_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
+        if const { same_byte_order::<O, TARGET>() } {
+            let bytes = self.data.as_ref();
+            if self.marks.mode() == 0
+                && bytes.len() >= 3
+                && unsafe { *bytes.as_ptr().add(1).cast::<[u8; 2]>() == [0, 0] }
+            {
+                return bytes.to_vec();
+            }
+            let (tag, payload) = self.raw_root_parts();
+            if tag == TagID::End {
+                cold_path();
+                return vec![0];
+            }
+            let mut out = Vec::with_capacity(3 + payload.len());
+            unsafe {
+                let dst = out.as_mut_ptr();
+                std::ptr::write(dst, tag as u8);
+                std::ptr::write(dst.add(1).cast::<[u8; 2]>(), [0, 0]);
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), dst.add(3), payload.len());
+                out.set_len(3 + payload.len());
+            }
+            out
+        } else {
+            crate::write::write_to_vec::<TARGET>(self.root())
+        }
+    }
+
+    /// Serializes this NBT document in big-endian format with an empty root name (`""`).
+    #[inline]
+    pub fn write_to_vec_be(&self) -> Vec<u8> {
+        self.write_to_vec::<BigEndian>()
+    }
+
+    /// Serializes this NBT document in little-endian format with an empty root name (`""`).
+    #[inline]
+    pub fn write_to_vec_le(&self) -> Vec<u8> {
+        self.write_to_vec::<LittleEndian>()
+    }
+
+    /// Appends this NBT document with an empty root name (`""`) into `out`.
+    #[inline]
+    pub fn write_into<TARGET: ByteOrder>(&self, out: &mut Vec<u8>) {
+        if const { same_byte_order::<O, TARGET>() } {
+            let (tag, payload) = self.raw_root_parts();
+            if tag == TagID::End {
+                cold_path();
+                out.push(0);
+                return;
+            }
+            let _ = out.write_2(&[tag as u8, 0, 0], payload);
+        } else {
+            crate::write::write_into::<TARGET>(self.root(), out);
+        }
+    }
+
+    /// Appends this NBT document in big-endian format with an empty root name (`""`) into `out`.
+    #[inline]
+    pub fn write_into_be(&self, out: &mut Vec<u8>) {
+        self.write_into::<BigEndian>(out);
+    }
+
+    /// Appends this NBT document in little-endian format with an empty root name (`""`) into `out`.
+    #[inline]
+    pub fn write_into_le(&self, out: &mut Vec<u8>) {
+        self.write_into::<LittleEndian>(out);
+    }
+
+    /// Serializes this NBT document without a root name (Minecraft 1.20.2+ network format).
+    #[inline]
+    pub fn write_nameless_to_vec<TARGET: ByteOrder>(&self) -> Vec<u8> {
+        if const { same_byte_order::<O, TARGET>() } {
+            if self.marks.mode() == 0x10 {
+                return self.data.as_ref().to_vec();
+            }
+            let (tag, payload) = self.raw_root_parts();
+            if tag == TagID::End {
+                cold_path();
+                return vec![0];
+            }
+            let mut out = Vec::with_capacity(1 + payload.len());
+            unsafe {
+                let dst = out.as_mut_ptr();
+                std::ptr::write(dst, tag as u8);
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), dst.add(1), payload.len());
+                out.set_len(1 + payload.len());
+            }
+            out
+        } else {
+            crate::write::write_nameless_to_vec::<TARGET>(self.root())
+        }
+    }
+
+    /// Serializes this NBT document in big-endian nameless format (`[tag_id][payload]`).
+    #[inline]
+    pub fn write_nameless_to_vec_be(&self) -> Vec<u8> {
+        self.write_nameless_to_vec::<BigEndian>()
+    }
+
+    /// Serializes this NBT document in little-endian nameless format (`[tag_id][payload]`).
+    #[inline]
+    pub fn write_nameless_to_vec_le(&self) -> Vec<u8> {
+        self.write_nameless_to_vec::<LittleEndian>()
+    }
+
+    /// Appends this NBT document without a root name into `out`.
+    #[inline]
+    pub fn write_nameless_into<TARGET: ByteOrder>(&self, out: &mut Vec<u8>) {
+        if const { same_byte_order::<O, TARGET>() } {
+            let (tag, payload) = self.raw_root_parts();
+            if tag == TagID::End {
+                cold_path();
+                out.push(0);
+                return;
+            }
+            let _ = out.write_2(&[tag as u8], payload);
+        } else {
+            crate::write::write_nameless_into::<TARGET>(self.root(), out);
+        }
+    }
+
+    impl_inherent_write_common_methods!();
 }
 
 impl<O: ByteOrder, B: AsRef<[u8]>> fmt::Debug for Document<O, B> {
@@ -481,8 +638,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
                 }
 
                 let raw_len = *ptr.add(1).cast::<[u8; 2]>();
-                if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes
-                {
+                if raw_len == key_len_raw && key_eq(ptr.add(3), key_bytes.as_ptr(), key_len) {
                     return Some((
                         tag_id,
                         BorrowedIterCursor {
@@ -708,6 +864,36 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         }
     }
 
+    #[inline]
+    fn compound_to_owned<TARGET: ByteOrder>(
+        cursor: Self::CompoundCursor<'_>,
+    ) -> crate::Compound<TARGET> {
+        // `cursor.data` is exactly one compound payload that `parse_marks` already validated, so
+        // the owned parser can bulk-copy it like `read_owned` instead of re-inserting every entry.
+        let range = cursor.data.as_ptr_range();
+        let mut pos = range.start;
+        match unsafe { read_compound::<O, TARGET>(&mut pos, range.end) } {
+            Ok(comp) => comp,
+            Err(_) => {
+                cold_path();
+                CompoundRef::<Self>::from_cursor(cursor).to_owned_compound_slow::<TARGET>()
+            }
+        }
+    }
+
+    #[inline]
+    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> crate::List<TARGET> {
+        let range = cursor.data.as_ptr_range();
+        let mut pos = range.start;
+        match unsafe { read_list::<O, TARGET>(&mut pos, range.end) } {
+            Ok(list) => list,
+            Err(_) => {
+                cold_path();
+                ListRef::<Self>::from_cursor(cursor).to_owned_list_slow::<TARGET>()
+            }
+        }
+    }
+
     #[inline(always)]
     fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
         cursor.data.len()
@@ -718,7 +904,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         cursor.data.len()
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
@@ -727,7 +913,10 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         if const { same_byte_order::<O, TARGET>() } {
             sink.write_2(hdr, cursor.data)
         } else {
-            sink.write_bytes(hdr)?;
+            sink.reserve(hdr.len() + cursor.data.len());
+            if !hdr.is_empty() {
+                sink.write_bytes(hdr)?;
+            }
             let written =
                 unsafe { write_compound_swapped::<O, TARGET, _>(cursor.data.as_ptr(), sink)? };
             debug_assert_eq!(written, cursor.data.len());
@@ -735,7 +924,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::ListCursor<'_>,
@@ -744,7 +933,10 @@ impl<O: ByteOrder> Source for Borrowed<O> {
         if const { same_byte_order::<O, TARGET>() } {
             sink.write_2(hdr, cursor.data)
         } else {
-            sink.write_bytes(hdr)?;
+            sink.reserve(hdr.len() + cursor.data.len());
+            if !hdr.is_empty() {
+                sink.write_bytes(hdr)?;
+            }
             let written =
                 unsafe { write_list_swapped::<O, TARGET, _>(cursor.data.as_ptr(), sink)? };
             debug_assert_eq!(written, cursor.data.len());

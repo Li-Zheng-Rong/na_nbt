@@ -107,22 +107,25 @@ impl<'de> Visitor<'de> for Mutf8StringVisitor {
 
     #[inline]
     fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-        Ok(MUTF8String::from_raw_slice(v))
+        MUTF8String::try_from(unsafe { MUTF8Str::from_mutf8_unchecked(v) }).map_err(map_nbt_err)
     }
 
     #[inline]
     fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
-        Ok(MUTF8String(v))
+        if v.len() > MUTF8String::MAX_LEN {
+            return Err(map_nbt_err(Error::LEN(v.len())));
+        }
+        Ok(unsafe { MUTF8String::from_mutf8_unchecked(v) })
     }
 
     #[inline]
     fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(MUTF8String::from(v))
+        MUTF8String::try_from(v).map_err(map_nbt_err)
     }
 
     #[inline]
     fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-        Ok(MUTF8String::from(v))
+        MUTF8String::try_from(v).map_err(map_nbt_err)
     }
 
     #[inline]
@@ -484,12 +487,12 @@ impl<'de, O: ByteOrder> Visitor<'de> for ValueVisitor<O> {
 
     #[inline]
     fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(Value::String(MUTF8String::from(v)))
+        Value::try_from(v).map_err(map_nbt_err)
     }
 
     #[inline]
     fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-        Ok(Value::String(MUTF8String::from(v)))
+        Value::try_from(v).map_err(map_nbt_err)
     }
 
     #[inline]
@@ -582,6 +585,8 @@ impl<'de, O: ByteOrder> Visitor<'de> for CompoundVisitor<O> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut comp = Compound::<O>::new();
+        // `MUTF8String` keys and `Value::String`s are bounded by construction, so nothing here
+        // can hit the panicking length checks of `insert_value`.
         while let Some((key, value)) = map.next_entry::<MUTF8String, Value<O>>()? {
             if !value.is_end() {
                 comp.insert_value(key, value);

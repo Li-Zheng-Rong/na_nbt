@@ -3,12 +3,14 @@ use std::{borrow::Cow, fmt, marker::PhantomData, mem::ManuallyDrop, ptr, slice};
 use zerocopy::{byteorder, BigEndian};
 
 use crate::{
-    cold_path,
+    cold_path, key_eq,
     owned::{
-        slot::{drop_compound_entries, mutable_tag_size, slot_write},
+        list::clone_list_raw,
+        slot::{drop_compound_entries, mutable_tag_size, slot_write, vec_copy_endian},
         OwnedPtr,
     },
-    write::impl_inherent_write_methods,
+    same_byte_order,
+    write::{impl_inherent_write_methods, swap_u16, swap_u32, swap_u64},
     AsKey, ByteOrder, CompoundIter, CompoundRef, ElementTag, IntoNBT, List, ListRef, MUTF8Str,
     MUTF8String, Mut, Owned, ScalarMut, Tag, TagID, Value, ValueMut, ValueRef, EMPTY_COMPOUND,
 };
@@ -321,7 +323,9 @@ impl<O: ByteOrder> Compound<O> {
     ///
     /// # Panics
     ///
-    /// Panics if `V::Tag` is `()` (`TagID::End`) or if the MUTF-8 encoded key exceeds `u16::MAX` bytes.
+    /// Panics if `V::Tag` is `()` (`TagID::End`), if the MUTF-8 encoded key exceeds `u16::MAX`
+    /// bytes, or if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
+    /// encoded (see [`IntoNBT`]).
     pub fn insert<V: IntoNBT<O>>(&mut self, key: impl AsKey, value: V) -> Option<Value<O>> {
         assert!(
             const { V::Tag::TAG_ID as u8 != TagID::End as u8 },
@@ -352,6 +356,64 @@ impl<O: ByteOrder> Compound<O> {
             Value::IntArray(v) => self.insert_raw::<[i32]>(k, v),
             Value::LongArray(v) => self.insert_raw::<[i64]>(k, v),
         })
+    }
+
+    #[inline]
+    fn append_raw<T: ?Sized + ElementTag>(&mut self, k: &MUTF8Str, new_val: T::Own<O>) {
+        let new_size = const { T::INLINE_SIZE };
+        let name_bytes = k.as_bytes();
+        assert!(
+            name_bytes.len() <= u16::MAX as usize,
+            "compound key length too long"
+        );
+        let name_len = name_bytes.len();
+        let name_len_raw = byteorder::U16::<O>::new(name_len as u16).to_bytes();
+
+        unsafe {
+            if self.data.is_empty() {
+                let total = 3 + name_len + new_size + 1;
+                self.data.reserve(total);
+                let dst = self.data.as_mut_ptr();
+                dst.write(T::TAG_ID as u8);
+                ptr::write_unaligned(dst.add(1).cast::<[u8; 2]>(), name_len_raw);
+                ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(3), name_len);
+                T::write_own_to_slot::<O>(dst.add(3 + name_len), new_val);
+                dst.add(3 + name_len + new_size).write(TagID::End as u8);
+                self.data.set_len(total);
+                return;
+            }
+
+            let old_len = self.data.len();
+            let entry_bytes = 3 + name_len + new_size;
+            self.data.reserve(entry_bytes);
+            let dst = self.data.as_mut_ptr().add(old_len - 1);
+            dst.write(T::TAG_ID as u8);
+            ptr::write_unaligned(dst.add(1).cast::<[u8; 2]>(), name_len_raw);
+            ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(3), name_len);
+            T::write_own_to_slot::<O>(dst.add(3 + name_len), new_val);
+            dst.add(entry_bytes).write(TagID::End as u8);
+            self.data.set_len(old_len + entry_bytes);
+        }
+    }
+
+    /// Appends an entry at the end without scanning for an existing key (preserving wire-order
+    /// duplicate keys during fallback conversions).
+    pub(crate) fn append_raw_value(&mut self, k: &MUTF8Str, value: Value<O>) {
+        match value {
+            Value::End => panic!("End cannot be inserted into a compound"),
+            Value::Byte(v) => self.append_raw::<i8>(k, v),
+            Value::Short(v) => self.append_raw::<i16>(k, v),
+            Value::Int(v) => self.append_raw::<i32>(k, v),
+            Value::Long(v) => self.append_raw::<i64>(k, v),
+            Value::Float(v) => self.append_raw::<f32>(k, v),
+            Value::Double(v) => self.append_raw::<f64>(k, v),
+            Value::ByteArray(v) => self.append_raw::<[i8]>(k, v),
+            Value::String(v) => self.append_raw::<str>(k, v),
+            Value::List(v) => self.append_raw::<List<BigEndian>>(k, v),
+            Value::Compound(v) => self.append_raw::<Compound<BigEndian>>(k, v),
+            Value::IntArray(v) => self.append_raw::<[i32]>(k, v),
+            Value::LongArray(v) => self.append_raw::<[i64]>(k, v),
+        }
     }
 
     /// Removes and returns the entry at `key`, or `None` if absent.
@@ -455,7 +517,7 @@ unsafe fn find_entry_mut<O: ByteOrder>(
                 return None;
             }
             let raw_len = *ptr.add(1).cast::<[u8; 2]>();
-            if raw_len == key_len_raw && slice::from_raw_parts(ptr.add(3), key_len) == key_bytes {
+            if raw_len == key_len_raw && key_eq(ptr.add(3), key_bytes.as_ptr(), key_len) {
                 return Some((ptr, tag_id, ptr.add(3 + key_len)));
             }
             let name_len = byteorder::U16::<O>::from_bytes(raw_len).get() as usize;
@@ -480,53 +542,141 @@ impl<O: ByteOrder> Clone for Compound<O> {
         if self.is_empty() {
             return Self::new();
         }
-        let mut guard = Compound {
-            data: Vec::with_capacity(self.data.len()),
-            _marker: PhantomData,
-        };
-        unsafe {
-            let src_base = self.data.as_ptr();
-            let dst_base = guard.data.as_mut_ptr();
-            ptr::copy_nonoverlapping(src_base, dst_base, self.data.len());
-            dst_base.write(TagID::End as u8);
-            guard.data.set_len(1);
-            let mut off = 0usize;
-            loop {
-                let tag_id = *src_base.add(off).cast::<TagID>();
-                if tag_id == TagID::End {
-                    return guard;
-                }
-                let name_len =
-                    byteorder::U16::<O>::from_bytes(*src_base.add(off + 1).cast()).get() as usize;
-                let val_off = off + 3 + name_len;
-                let size = mutable_tag_size(tag_id);
-                let src_slot = src_base.add(val_off);
-                let dst_slot = dst_base.add(val_off);
+        unsafe { clone_compound_raw::<O, O>(self.data.as_ptr(), self.data.len()) }
+    }
+}
 
-                macro_rules! clone_slot {
-                    ($ty:ty) => {{
-                        let borrowed = ptr::read_unaligned(src_slot.cast::<ManuallyDrop<$ty>>());
-                        let cloned: $ty = (*borrowed).clone();
-                        slot_write(dst_slot, cloned);
-                    }};
-                }
-
-                match tag_id {
-                    TagID::ByteArray => clone_slot!(Vec<i8>),
-                    TagID::String => clone_slot!(MUTF8String),
-                    TagID::List => clone_slot!(List<O>),
-                    TagID::Compound => clone_slot!(Compound<O>),
-                    TagID::IntArray => clone_slot!(Vec<byteorder::I32<O>>),
-                    TagID::LongArray => clone_slot!(Vec<byteorder::I64<O>>),
-                    _ => {}
-                }
-                // Commit entry `off` and advance the temporary `End` sentinel for panic safety
-                dst_base.add(off).write(tag_id as u8);
-                let next_off = val_off + size;
-                dst_base.add(next_off).write(TagID::End as u8);
-                guard.data.set_len(next_off + 1);
-                off = next_off;
+/// Byte length of the non-empty compound buffer at `ptr`, including its trailing `End` byte.
+pub(crate) unsafe fn compound_raw_len<O: ByteOrder>(ptr: *const u8) -> usize {
+    unsafe {
+        let mut p = ptr;
+        loop {
+            let tag_id = *p.cast::<TagID>();
+            if tag_id == TagID::End {
+                return p.byte_offset_from_unsigned(ptr) + 1;
             }
+            let name_len = byteorder::U16::<O>::from_bytes(*p.add(1).cast()).get() as usize;
+            p = p.add(3 + name_len + mutable_tag_size(tag_id));
+        }
+    }
+}
+
+/// Deep-clones the non-empty compound buffer of `len` bytes at `src_base` from byte order `O` into
+/// `TARGET`, preserving wire-order duplicate keys.
+pub(crate) unsafe fn clone_compound_raw<O: ByteOrder, TARGET: ByteOrder>(
+    src_base: *const u8,
+    len: usize,
+) -> Compound<TARGET> {
+    let same_order = const { same_byte_order::<O, TARGET>() };
+    let mut guard = Compound {
+        data: Vec::with_capacity(len),
+        _marker: PhantomData,
+    };
+    unsafe {
+        let dst_base = guard.data.as_mut_ptr();
+        ptr::copy_nonoverlapping(src_base, dst_base, len);
+        dst_base.write(TagID::End as u8);
+        guard.data.set_len(1);
+        let mut off = 0usize;
+        loop {
+            let tag_id = *src_base.add(off).cast::<TagID>();
+            if tag_id == TagID::End {
+                return guard;
+            }
+            let raw_name_len = *src_base.add(off + 1).cast::<[u8; 2]>();
+            let name_len = byteorder::U16::<O>::from_bytes(raw_name_len).get() as usize;
+            if !same_order {
+                dst_base
+                    .add(off + 1)
+                    .cast::<[u8; 2]>()
+                    .write(swap_u16::<O, TARGET>(raw_name_len));
+            }
+            let val_off = off + 3 + name_len;
+            let size = mutable_tag_size(tag_id);
+            let src_slot = src_base.add(val_off);
+            let dst_slot = dst_base.add(val_off);
+
+            macro_rules! clone_slot {
+                ($ty:ty) => {{
+                    let borrowed = ptr::read_unaligned(src_slot.cast::<ManuallyDrop<$ty>>());
+                    let cloned: $ty = (*borrowed).clone();
+                    slot_write(dst_slot, cloned);
+                }};
+            }
+
+            match tag_id {
+                TagID::Short if !same_order => {
+                    dst_slot
+                        .cast::<[u8; 2]>()
+                        .write(swap_u16::<O, TARGET>(*src_slot.cast()));
+                }
+                TagID::Int | TagID::Float if !same_order => {
+                    dst_slot
+                        .cast::<[u8; 4]>()
+                        .write(swap_u32::<O, TARGET>(*src_slot.cast()));
+                }
+                TagID::Long | TagID::Double if !same_order => {
+                    dst_slot
+                        .cast::<[u8; 8]>()
+                        .write(swap_u64::<O, TARGET>(*src_slot.cast()));
+                }
+                TagID::ByteArray => clone_slot!(Vec<i8>),
+                TagID::String => clone_slot!(MUTF8String),
+                TagID::List => {
+                    let borrowed = ptr::read_unaligned(src_slot.cast::<ManuallyDrop<List<O>>>());
+                    let cloned = if borrowed.data.is_empty() {
+                        List::new()
+                    } else {
+                        clone_list_raw::<O, TARGET>(borrowed.data.as_ptr(), borrowed.data.len())
+                    };
+                    slot_write(dst_slot, cloned);
+                }
+                TagID::Compound => {
+                    let borrowed =
+                        ptr::read_unaligned(src_slot.cast::<ManuallyDrop<Compound<O>>>());
+                    let cloned = if borrowed.is_empty() {
+                        Compound::new()
+                    } else {
+                        clone_compound_raw::<O, TARGET>(borrowed.data.as_ptr(), borrowed.data.len())
+                    };
+                    slot_write(dst_slot, cloned);
+                }
+                TagID::IntArray => {
+                    let borrowed = ptr::read_unaligned(
+                        src_slot.cast::<ManuallyDrop<Vec<byteorder::I32<O>>>>(),
+                    );
+                    slot_write(
+                        dst_slot,
+                        vec_copy_endian::<byteorder::I32<O>, byteorder::I32<TARGET>, 4>(
+                            borrowed.as_ptr(),
+                            borrowed.len(),
+                            same_order,
+                            swap_u32::<O, TARGET>,
+                        ),
+                    );
+                }
+                TagID::LongArray => {
+                    let borrowed = ptr::read_unaligned(
+                        src_slot.cast::<ManuallyDrop<Vec<byteorder::I64<O>>>>(),
+                    );
+                    slot_write(
+                        dst_slot,
+                        vec_copy_endian::<byteorder::I64<O>, byteorder::I64<TARGET>, 8>(
+                            borrowed.as_ptr(),
+                            borrowed.len(),
+                            same_order,
+                            swap_u64::<O, TARGET>,
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            // Commit entry `off` and advance the temporary `End` sentinel for panic safety
+            dst_base.add(off).write(tag_id as u8);
+            let next_off = val_off + size;
+            dst_base.add(next_off).write(TagID::End as u8);
+            guard.data.set_len(next_off + 1);
+            off = next_off;
         }
     }
 }

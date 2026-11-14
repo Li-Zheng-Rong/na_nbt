@@ -90,6 +90,45 @@ pub(crate) unsafe fn slot_read<T>(src: *const u8) -> T {
     unsafe { ManuallyDrop::into_inner(ptr::read_unaligned(src.cast::<ManuallyDrop<T>>())) }
 }
 
+/// Copies `len` plain-data elements into a new `Vec` with a single `memcpy`.
+///
+/// `<[T]>::to_vec` / `Vec::clone` do not lower to `memcpy` for zerocopy's byte-order wrappers
+/// (they compile to an element loop), which is measurably slower for large NBT arrays.
+#[inline(always)]
+pub(crate) unsafe fn vec_copy_raw<T: Copy>(src: *const T, len: usize) -> Vec<T> {
+    let mut out = Vec::<T>::with_capacity(len);
+    unsafe {
+        ptr::copy_nonoverlapping(src, out.as_mut_ptr(), len);
+        out.set_len(len);
+    }
+    out
+}
+
+#[inline(always)]
+pub(crate) unsafe fn vec_copy_endian<Src: Copy, Dst: Copy, const N: usize>(
+    src: *const Src,
+    len: usize,
+    same_order: bool,
+    swap: impl Fn([u8; N]) -> [u8; N],
+) -> Vec<Dst> {
+    debug_assert_eq!(mem::size_of::<Src>(), N);
+    debug_assert_eq!(mem::size_of::<Dst>(), N);
+    let mut out = Vec::<Dst>::with_capacity(len);
+    unsafe {
+        if same_order {
+            ptr::copy_nonoverlapping(src.cast::<u8>(), out.as_mut_ptr().cast::<u8>(), len * N);
+        } else {
+            let src_bytes = slice::from_raw_parts(src.cast::<[u8; N]>(), len);
+            let dst_bytes = out.as_mut_ptr().cast::<[u8; N]>();
+            for (i, &b) in src_bytes.iter().enumerate() {
+                dst_bytes.add(i).write(swap(b));
+            }
+        }
+        out.set_len(len);
+    }
+    out
+}
+
 #[inline(always)]
 pub(crate) unsafe fn slot_vec_parts<T>(slot: *const u8) -> (*const T, usize) {
     let v = unsafe { ptr::read_unaligned(slot.cast::<ManuallyDrop<Vec<T>>>()) };
@@ -104,7 +143,12 @@ pub(crate) unsafe fn slot_borrow_slice<'a, T>(slot: *const u8) -> &'a [T] {
 
 #[inline(always)]
 pub(crate) unsafe fn slot_borrow_str<'a>(slot: *const u8) -> &'a MUTF8Str {
-    unsafe { MUTF8Str::from_mutf8_unchecked(slot_borrow_slice::<u8>(slot)) }
+    let bytes = unsafe { slot_borrow_slice::<u8>(slot) };
+    debug_assert!(bytes.len() <= MUTF8String::MAX_LEN);
+    unsafe {
+        assert_unchecked(bytes.len() <= MUTF8String::MAX_LEN);
+        MUTF8Str::from_mutf8_unchecked(bytes)
+    }
 }
 
 #[inline(always)]
@@ -181,6 +225,11 @@ pub(crate) unsafe fn drop_list_elements<O: ByteOrder>(tag_id: TagID, ptr: *mut u
 /// [`Vec`], [`MUTF8String`]) stored in an unaligned 24-byte slot.
 ///
 /// Dereferences directly to `&mut T` so all methods on `T` are available without indirection.
+///
+/// A [`MUTF8String`] cannot grow past [`MUTF8String::MAX_LEN`], so every string reached through
+/// this guard stays writable. Arrays (`Vec`) have no such bound: one grown past `u32::MAX`
+/// elements makes `write_to_vec` panic, while `write_to` and serde serialization return
+/// [`Error::LEN`](crate::Error::LEN).
 pub struct Mut<'a, T: SlotValue> {
     value: ManuallyDrop<T>,
     slot: *mut u8,

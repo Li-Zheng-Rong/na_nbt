@@ -517,7 +517,8 @@ pub(crate) fn parse_marks_prefix<O: ByteOrder, const NAMELESS: bool>(
             }
             hdr
         };
-        let payload_len = parse_marks_payload::<O>(root_tag, &src[root_hdr..], out_marks)?;
+        let payload_len =
+            parse_marks_payload::<O>(root_tag, src.get_unchecked(root_hdr..), out_marks)?;
         Ok(root_hdr + payload_len)
     }
 }

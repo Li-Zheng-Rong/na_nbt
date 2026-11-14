@@ -7,8 +7,8 @@ use crate::{
     index::{AsKey, Index},
     owned::into_nbt::IntoNBT,
     write::impl_inherent_write_methods,
-    Borrowed, ByteOrder, Compound, Document, ElementTag, List, MUTF8Str, MUTF8String, Mut, Owned,
-    Source, Tag, TagID, TypedList, Value, ValueMut,
+    Borrowed, ByteOrder, Compound, Document, ElementTag, List, MUTF8Str, Mut, Owned, Source, Tag,
+    TagID, TypedList, Value, ValueMut,
 };
 
 /// A lightweight `Copy` read-only view of any NBT value (borrowed or owned).
@@ -386,7 +386,7 @@ impl<'a, S: Source> ValueRef<'a, S> {
             Self::Float(v) => Value::Float(v),
             Self::Double(v) => Value::Double(v),
             Self::ByteArray(v) => Value::ByteArray(v.to_vec()),
-            Self::String(v) => Value::String(MUTF8String::from(v)),
+            Self::String(v) => Value::String(v.to_owned()),
             Self::IntArray(v) => Value::IntArray(IntoNBT::<TARGET>::into_nbt(v)),
             Self::LongArray(v) => Value::LongArray(IntoNBT::<TARGET>::into_nbt(v)),
             Self::List(v) => Value::List(v.to_owned_list::<TARGET>()),
@@ -589,10 +589,16 @@ impl<'a, S: Source> CompoundRef<'a, S> {
     }
 
     /// Clones this compound view into an owned [`Compound<TARGET>`].
+    #[inline]
     pub fn to_owned_compound<TARGET: ByteOrder>(&self) -> Compound<TARGET> {
+        S::compound_to_owned::<TARGET>(self.cursor)
+    }
+
+    /// Entry-by-entry conversion, used where a [`Source`] has no bulk path.
+    pub(crate) fn to_owned_compound_slow<TARGET: ByteOrder>(self) -> Compound<TARGET> {
         let mut out = Compound::<TARGET>::new();
         for (k, v) in self.iter() {
-            out.insert_value(k, v.to_owned_value::<TARGET>());
+            out.append_raw_value(k, v.to_owned_value::<TARGET>());
         }
         out
     }
@@ -940,6 +946,12 @@ impl<'a, S: Source> ListRef<'a, S> {
         if len == 0 {
             return List::with_tag_id(tag_id);
         }
+        S::list_to_owned::<TARGET>(self.cursor)
+    }
+
+    /// Element-by-element conversion, used where a [`Source`] has no bulk path.
+    pub(crate) fn to_owned_list_slow<TARGET: ByteOrder>(self) -> List<TARGET> {
+        let tag_id = self.element_tag_id();
         let mut out = List::<TARGET>::with_tag_id(tag_id);
         for item in self.iter() {
             let _ = out.push_value(item.to_owned_value::<TARGET>());

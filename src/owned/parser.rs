@@ -9,7 +9,7 @@ use zerocopy::byteorder;
 
 use crate::{
     cold_path,
-    owned::slot::{drop_compound_entries, drop_list_elements, slot_write, SIZE_DYN},
+    owned::slot::{drop_compound_entries, drop_list_elements, slot_write, vec_copy_raw, SIZE_DYN},
     same_byte_order,
     write::{swap_u16, swap_u32, swap_u64},
     ByteOrder, Compound, Error, List, MUTF8String, Result, TagID, Value,
@@ -32,7 +32,25 @@ impl<O: ByteOrder> CompoundBuildGuard<O> {
     #[cold]
     #[inline(never)]
     fn reserve_slow(&mut self, need: usize) {
-        self.data.reserve(need.max(128));
+        let need = need.max(128);
+        if self.data.capacity() == 0 {
+            // First allocation: go straight to the allocator instead of through `Vec::reserve`'s
+            // amortized-growth path (`grow_amortized` + `finish_grow`), which costs far more
+            // than the allocation itself.
+            *self.data = Vec::with_capacity(need);
+        } else {
+            self.data.reserve(need);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow_for_tail(&mut self, raw_len: usize) {
+        if self.data.capacity() == 0 {
+            *self.data = Vec::with_capacity(raw_len);
+        } else {
+            self.data.reserve(raw_len);
+        }
     }
 
     #[inline(always)]
@@ -48,7 +66,7 @@ impl<O: ByteOrder> CompoundBuildGuard<O> {
             return Compound::new();
         }
         if self.data.capacity() - old_len < raw_len {
-            self.data.reserve(raw_len);
+            self.grow_for_tail(raw_len);
         }
         let vec = unsafe {
             let dst = self.data.as_mut_ptr().add(old_len);
@@ -167,7 +185,7 @@ unsafe fn read_i32_vec<O: ByteOrder, R: ByteOrder>(
     len: usize,
 ) -> Vec<byteorder::I32<R>> {
     if const { same_byte_order::<O, R>() } {
-        return unsafe { slice::from_raw_parts(src.cast::<byteorder::I32<R>>(), len) }.to_vec();
+        return unsafe { vec_copy_raw(src.cast::<byteorder::I32<R>>(), len) };
     }
     let mut out = Vec::<byteorder::I32<R>>::with_capacity(len);
     unsafe {
@@ -188,7 +206,7 @@ unsafe fn read_i64_vec<O: ByteOrder, R: ByteOrder>(
     len: usize,
 ) -> Vec<byteorder::I64<R>> {
     if const { same_byte_order::<O, R>() } {
-        return unsafe { slice::from_raw_parts(src.cast::<byteorder::I64<R>>(), len) }.to_vec();
+        return unsafe { vec_copy_raw(src.cast::<byteorder::I64<R>>(), len) };
     }
     let mut out = Vec::<byteorder::I64<R>>::with_capacity(len);
     unsafe {
