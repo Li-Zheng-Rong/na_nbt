@@ -4,17 +4,30 @@ use base64ct::Encoding;
 use serde::{ser, Serialize};
 use zerocopy::{byteorder, BigEndian, LittleEndian};
 
-use crate::{cold_path, encode_mutf8, tag_of, AsKey, ByteOrder, Error, Result, TagID};
+use crate::{
+    cold_path,
+    mutf8::with_mutf8_key,
+    ser_de::tag_probe::{probe_of, probe_tag_id},
+    write::ByteSink,
+    AsKey, ByteOrder, Error, Result, TagID,
+};
 
 /// Serializes a value to a byte vector in NBT format with an empty root name (`""`).
 #[inline]
 pub fn to_vec<O: ByteOrder>(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
-    let tag_id = tag_of(value);
+    let (tag_id, hint) = probe_of(value)?;
     if tag_id == TagID::End {
         return Ok(vec![0]);
     }
+    let mut vec = Vec::with_capacity(3 + hint);
+    unsafe {
+        let p = vec.as_mut_ptr();
+        ptr::write(p, tag_id as u8);
+        ptr::write(p.add(1).cast::<[u8; 2]>(), [0u8; 2]);
+        vec.set_len(3);
+    }
     let mut serializer = Serializer::<O> {
-        vec: vec![tag_id as u8, 0, 0],
+        vec,
         _marker: PhantomData,
     };
     value.serialize(&mut serializer)?;
@@ -39,24 +52,32 @@ pub fn to_vec_named<O: ByteOrder>(
     name: impl AsKey,
     value: &(impl ?Sized + Serialize),
 ) -> Result<Vec<u8>> {
-    let tag_id = tag_of(value);
+    let (tag_id, hint) = probe_of(value)?;
     if tag_id == TagID::End {
         return Ok(vec![0]);
     }
-    let mut vec = name.with_mutf8(|key| -> Result<Vec<u8>> {
+    let vec = name.with_mutf8(|key| -> Result<Vec<u8>> {
         let bytes = key.as_bytes();
         if bytes.len() > u16::MAX as usize {
             cold_path();
             return Err(Error::LEN(bytes.len()));
         }
-        let mut hdr = Vec::with_capacity(3 + bytes.len() + 32);
-        hdr.push(tag_id as u8);
-        hdr.extend_from_slice(&byteorder::U16::<O>::new(bytes.len() as u16).to_bytes());
-        hdr.extend_from_slice(bytes);
+        let hdr_len = 3 + bytes.len();
+        let mut hdr = Vec::with_capacity(hdr_len + hint);
+        unsafe {
+            let p = hdr.as_mut_ptr();
+            ptr::write(p, tag_id as u8);
+            ptr::write(
+                p.add(1).cast::<[u8; 2]>(),
+                byteorder::U16::<O>::new(bytes.len() as u16).to_bytes(),
+            );
+            ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(3), bytes.len());
+            hdr.set_len(hdr_len);
+        }
         Ok(hdr)
     })?;
     let mut serializer = Serializer::<O> {
-        vec: std::mem::take(&mut vec),
+        vec,
         _marker: PhantomData,
     };
     value.serialize(&mut serializer)?;
@@ -79,12 +100,14 @@ pub fn to_vec_named_le(name: impl AsKey, value: &(impl ?Sized + Serialize)) -> R
 /// network format).
 #[inline]
 pub fn to_vec_nameless<O: ByteOrder>(value: &(impl ?Sized + Serialize)) -> Result<Vec<u8>> {
-    let tag_id = tag_of(value);
+    let (tag_id, hint) = probe_of(value)?;
     if tag_id == TagID::End {
         return Ok(vec![0]);
     }
+    let mut vec = Vec::with_capacity(1 + hint);
+    vec.push(tag_id as u8);
     let mut serializer = Serializer::<O> {
-        vec: vec![tag_id as u8],
+        vec,
         _marker: PhantomData,
     };
     value.serialize(&mut serializer)?;
@@ -236,19 +259,20 @@ unsafe fn write_wrapped_list_header<O: ByteOrder>(dst: *mut u8, len: usize) -> R
 }
 
 impl<O: ByteOrder> Serializer<O> {
+    #[inline]
     fn write_compound_item<T: ?Sized + Serialize>(&mut self, name: &str, value: &T) -> Result<()> {
-        let tag_id = tag_of(value);
+        let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
             return Err(Error::INVALID(0));
         }
-        let encoded = encode_mutf8(name);
-        self.write_compound_header(tag_id, &encoded)?;
+        with_mutf8_key(name, |k| self.write_compound_header(tag_id, k.as_bytes()))?;
         value.serialize(&mut *self)
     }
 
+    #[inline]
     fn write_wrapped_item<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        let tag_id = tag_of(value);
+        let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
             return Err(Error::INVALID(0));
@@ -266,6 +290,7 @@ impl<O: ByteOrder> Serializer<O> {
         Ok(())
     }
 
+    #[inline]
     fn write_string(&mut self, encoded: &[u8]) -> Result<()> {
         unsafe {
             self.vec.reserve(2 + encoded.len());
@@ -276,6 +301,7 @@ impl<O: ByteOrder> Serializer<O> {
         }
     }
 
+    #[inline]
     fn write_compound_header(&mut self, tag_id: TagID, encoded: &[u8]) -> Result<()> {
         unsafe {
             self.vec.reserve(3 + encoded.len());
@@ -286,6 +312,7 @@ impl<O: ByteOrder> Serializer<O> {
         }
     }
 
+    #[inline]
     fn write_wrapped_list_header(&mut self, len: usize) -> Result<()> {
         unsafe {
             let old_len = self.vec.len();
@@ -391,11 +418,12 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         self.serialize_i128(v as i128)
     }
 
+    #[inline]
     fn serialize_str(self, v: &str) -> Result<()> {
-        let encoded = encode_mutf8(v);
-        self.write_string(&encoded)
+        with_mutf8_key(v, |k| self.write_string(k.as_bytes()))
     }
 
+    #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
         let len = v.len();
         if len > u32::MAX as usize {
@@ -416,23 +444,28 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         Ok(())
     }
 
+    #[inline]
     fn serialize_none(self) -> Result<()> {
         self.serialize_unit()
     }
 
+    #[inline]
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<()> {
         self.write_wrapped_item(value)
     }
 
+    #[inline]
     fn serialize_unit(self) -> Result<()> {
         self.vec.push(TagID::End as u8);
         Ok(())
     }
 
+    #[inline]
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
         self.serialize_unit()
     }
 
+    #[inline]
     fn serialize_unit_variant(
         self,
         _name: &'static str,
@@ -442,6 +475,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         self.serialize_u32(variant_index)
     }
 
+    #[inline]
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
         name: &'static str,
@@ -454,6 +488,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
             "na_nbt:end" => Ok(()),
             "na_nbt:compound" => value.serialize(&mut *self),
             "na_nbt:mutf8" => value.serialize(RawMutf8Serializer(&mut *self)),
+            RAW_PAYLOAD => value.serialize(RawPayloadSink(&mut *self)),
             _ => {
                 if let Some(elem_tag) = super::parse_empty_list_marker(name) {
                     self.vec.extend_from_slice(&[elem_tag, 0, 0, 0, 0]);
@@ -477,6 +512,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         Ok(())
     }
 
+    #[inline]
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
         if let Some(n) = len {
             if n > u32::MAX as usize {
@@ -503,11 +539,13 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         }
     }
 
+    #[inline]
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
         self.write_wrapped_list_header(len)?;
         Ok(&mut *self)
     }
 
+    #[inline]
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
@@ -523,19 +561,23 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        let encoded = encode_mutf8(variant);
-        let name_len = encoded.len();
-        unsafe {
-            let old_len = self.vec.len();
-            self.vec.reserve(8 + name_len);
-            let p = self.vec.as_mut_ptr().add(old_len);
-            write_compound_header::<O>(p, TagID::List, &encoded)?;
-            write_wrapped_list_header::<O>(p.add(3 + name_len), len)?;
-            self.vec.set_len(old_len + 8 + name_len);
-        }
+        with_mutf8_key(variant, |k| {
+            let encoded = k.as_bytes();
+            let name_len = encoded.len();
+            unsafe {
+                let old_len = self.vec.len();
+                self.vec.reserve(8 + name_len);
+                let p = self.vec.as_mut_ptr().add(old_len);
+                write_compound_header::<O>(p, TagID::List, encoded)?;
+                write_wrapped_list_header::<O>(p.add(3 + name_len), len)?;
+                self.vec.set_len(old_len + 8 + name_len);
+            }
+            Ok(())
+        })?;
         Ok(&mut *self)
     }
 
+    #[inline]
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
         Ok(MapSerializer {
             tag_pos: usize::MAX,
@@ -543,6 +585,7 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         })
     }
 
+    #[inline]
     fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
         Ok(&mut *self)
     }
@@ -554,8 +597,9 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        let encoded = encode_mutf8(variant);
-        self.write_compound_header(TagID::Compound, &encoded)?;
+        with_mutf8_key(variant, |k| {
+            self.write_compound_header(TagID::Compound, k.as_bytes())
+        })?;
         Ok(&mut *self)
     }
 }
@@ -837,12 +881,16 @@ impl<O: ByteOrder> ser::Serializer for ListSerializer<'_, O> {
         serialize_str: &str, serialize_bytes: &[u8],
     );
 
+    #[inline]
     fn serialize_seq(mut self, len: Option<usize>) -> Result<Self::SerializeSeq> {
         if len.is_some() {
             self.len = None;
         }
         self.serializer
             .write_wrapped_list_header(len.unwrap_or(0))?;
+        if let Some(n) = len {
+            self.serializer.vec.reserve(n.min(4096) * 4);
+        }
         Ok(self)
     }
 
@@ -855,6 +903,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         if let Some(len) = self.len {
             if len == u32::MAX {
@@ -862,7 +911,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
             }
             self.len = Some(len + 1);
         }
-        let tag_id = tag_of(value);
+        let tag_id = probe_tag_id(value)?;
         let expected = match self.element_tag {
             Some(expected) => expected,
             None => {
@@ -881,6 +930,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
         value.serialize(&mut *self.serializer)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
         unsafe {
             let base = self.serializer.vec.as_mut_ptr().add(self.start_pos);
@@ -984,37 +1034,39 @@ struct KeySerializer<'a, O: ByteOrder> {
 
 impl<O: ByteOrder> KeySerializer<'_, O> {
     fn write_wrapped<T: ?Sized + Serialize>(self, name: &str, value: &T) -> Result<()> {
-        let encoded = encode_mutf8(name);
-        let encoded_len = encoded.len();
+        with_mutf8_key(name, |k| {
+            let encoded = k.as_bytes();
+            let encoded_len = encoded.len();
 
-        let pos = self.serializer.vec.len();
-        value.serialize(KeySerializer {
-            tag_id: self.tag_id,
-            serializer: &mut *self.serializer,
-        })?;
+            let pos = self.serializer.vec.len();
+            value.serialize(KeySerializer {
+                tag_id: self.tag_id,
+                serializer: &mut *self.serializer,
+            })?;
 
-        unsafe {
-            let old_len = self.serializer.vec.len();
-            self.serializer.vec.reserve(encoded_len + 2);
-            let mut p = self.serializer.vec.as_mut_ptr().add(pos + 1);
-            let old_name_len = byteorder::U16::<O>::from_bytes(*p.cast()).get() as usize;
-            let new_name_len = old_name_len + encoded_len + 2;
-            if new_name_len > u16::MAX as usize {
-                cold_path();
-                return Err(Error::LEN(new_name_len));
+            unsafe {
+                let old_len = self.serializer.vec.len();
+                self.serializer.vec.reserve(encoded_len + 2);
+                let mut p = self.serializer.vec.as_mut_ptr().add(pos + 1);
+                let old_name_len = byteorder::U16::<O>::from_bytes(*p.cast()).get() as usize;
+                let new_name_len = old_name_len + encoded_len + 2;
+                if new_name_len > u16::MAX as usize {
+                    cold_path();
+                    return Err(Error::LEN(new_name_len));
+                }
+                ptr::write(
+                    p.cast::<[u8; 2]>(),
+                    byteorder::U16::<O>::new(new_name_len as u16).to_bytes(),
+                );
+                p = p.add(2);
+                ptr::copy(p, p.add(encoded_len + 1), old_name_len);
+                ptr::copy_nonoverlapping(encoded.as_ptr(), p, encoded_len);
+                ptr::write(p.add(encoded_len), b'(');
+                ptr::write(p.add(encoded_len + 1 + old_name_len), b')');
+                self.serializer.vec.set_len(old_len + encoded_len + 2);
             }
-            ptr::write(
-                p.cast::<[u8; 2]>(),
-                byteorder::U16::<O>::new(new_name_len as u16).to_bytes(),
-            );
-            p = p.add(2);
-            ptr::copy(p, p.add(encoded_len + 1), old_name_len);
-            ptr::copy_nonoverlapping(encoded.as_ptr(), p, encoded_len);
-            ptr::write(p.add(encoded_len), b'(');
-            ptr::write(p.add(encoded_len + 1 + old_name_len), b')');
-            self.serializer.vec.set_len(old_len + encoded_len + 2);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -1036,9 +1088,12 @@ impl<O: ByteOrder> ser::Serializer for KeySerializer<'_, O> {
         self.serialize_str(if v { "true" } else { "false" })
     }
 
+    #[inline]
     fn serialize_str(self, v: &str) -> Result<()> {
-        let encoded = encode_mutf8(v);
-        self.serializer.write_compound_header(self.tag_id, &encoded)
+        with_mutf8_key(v, |k| {
+            self.serializer
+                .write_compound_header(self.tag_id, k.as_bytes())
+        })
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
@@ -1185,6 +1240,215 @@ impl<O: ByteOrder> ser::Serializer for RawMutf8KeySerializer<'_, O> {
     }
 }
 
+/// Newtype name under which DOM types hand already-encoded NBT payload bytes to [`Serializer`].
+///
+/// DOM `Serialize` impls only emit it after [`native_target`] has confirmed that the serializer
+/// is this crate's own, so foreign serializers never see it.
+pub(crate) const RAW_PAYLOAD: &str = "na_nbt:raw_payload";
+
+/// Inside a [`RAW_PAYLOAD`] sequence: a chunk of 2-, 4- or 8-byte elements to byte-reverse.
+pub(crate) const RAW_SWAP: [&str; 3] = ["na_nbt:raw_swap2", "na_nbt:raw_swap4", "na_nbt:raw_swap8"];
+
+/// Returns `Some(is_big_endian)` when `S` is `&mut na_nbt::Serializer<_>`, `None` otherwise.
+///
+/// This is a pure identity check (lifetime-erased `TypeId` comparison); nothing is cast or
+/// downcast. Callers still talk to `S` exclusively through `serde::Serializer` methods.
+#[inline(always)]
+pub(crate) fn native_target<S: ?Sized>() -> Option<bool> {
+    let id = typeid::of::<S>();
+    if id == typeid::of::<&mut Serializer<BigEndian>>() {
+        Some(true)
+    } else if id == typeid::of::<&mut Serializer<LittleEndian>>() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+#[cold]
+fn raw_payload_misuse() -> Error {
+    Error::MSG(format!(
+        "`{RAW_PAYLOAD}` only accepts raw NBT payload bytes"
+    ))
+}
+
+/// Receives the [`RAW_PAYLOAD`] protocol: a sequence whose elements are
+/// `serialize_bytes(chunk)` (append verbatim), `RAW_SWAP[k]` newtypes (append byte-reversed),
+/// `serialize_u64(n)` (reserve `n` bytes) or `serialize_i64(n)` (an array of `n` elements does
+/// not fit its `u32` length prefix).
+struct RawPayloadSink<'a, O: ByteOrder>(&'a mut Serializer<O>);
+
+impl<O: ByteOrder> ser::Serializer for RawPayloadSink<'_, O> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = Self;
+    type SerializeTuple = ser::Impossible<(), Error>;
+
+    impl_reject_compounds!(Err(raw_payload_misuse()));
+    impl_reject_primitives!(
+        Err(raw_payload_misuse());
+        serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+        serialize_f32: f32, serialize_f64: f64, serialize_char: char, serialize_str: &str,
+    );
+
+    #[inline(always)]
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn serialize_u8(self, v: u8) -> Result<()> {
+        self.0.vec.push(v);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u16(self, ne_hdr: u16) -> Result<()> {
+        let old_len = self.0.vec.len();
+        self.0.vec.reserve(2);
+        unsafe {
+            ptr::write(self.0.vec.as_mut_ptr().add(old_len).cast::<u16>(), ne_hdr);
+            self.0.vec.set_len(old_len + 2);
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_u32(self, ne_hdr: u32) -> Result<()> {
+        let old_len = self.0.vec.len();
+        self.0.vec.reserve(4);
+        unsafe {
+            ptr::write(self.0.vec.as_mut_ptr().add(old_len).cast::<u32>(), ne_hdr);
+            self.0.vec.set_len(old_len + 4);
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.0.vec.extend_from_slice(v);
+        Ok(())
+    }
+
+    /// `RAW_SWAP[k]` wraps a chunk whose `2 << k`-byte elements must be byte-reversed.
+    #[inline(always)]
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<()> {
+        match name {
+            n if n == RAW_SWAP[0] => value.serialize(SwapSink::<O, 2>(self.0)),
+            n if n == RAW_SWAP[1] => value.serialize(SwapSink::<O, 4>(self.0)),
+            n if n == RAW_SWAP[2] => value.serialize(SwapSink::<O, 8>(self.0)),
+            _ => Err(raw_payload_misuse()),
+        }
+    }
+
+    fn serialize_none(self) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, _: &T) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+    fn serialize_unit(self) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+    fn serialize_unit_variant(self, _: &'static str, _: u32, _: &'static str) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<()> {
+        Err(raw_payload_misuse())
+    }
+
+    #[inline(always)]
+    fn serialize_u64(self, additional: u64) -> Result<()> {
+        self.0.vec.reserve(additional as usize);
+        Ok(())
+    }
+
+    #[cold]
+    fn serialize_i64(self, len: i64) -> Result<()> {
+        Err(Error::LEN(len as usize))
+    }
+
+    #[inline(always)]
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        Ok(self)
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        Err(raw_payload_misuse())
+    }
+}
+
+/// Appends a chunk of `N`-byte elements, byte-reversing each one.
+struct SwapSink<'a, O: ByteOrder, const N: usize>(&'a mut Serializer<O>);
+
+impl<O: ByteOrder, const N: usize> ser::Serializer for SwapSink<'_, O, N> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = ser::Impossible<(), Error>;
+    type SerializeTuple = ser::Impossible<(), Error>;
+
+    impl_reject_compounds!(Err(raw_payload_misuse()));
+    impl_reject_non_container!(Err(raw_payload_misuse()));
+    impl_reject_primitives!(
+        Err(raw_payload_misuse());
+        serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+        serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
+        serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
+        serialize_str: &str,
+    );
+
+    #[inline(always)]
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        if !v.len().is_multiple_of(N) {
+            return Err(raw_payload_misuse());
+        }
+        // SAFETY: `[u8; N]` has alignment 1 and `v` holds exactly `v.len() / N` of them.
+        let elems =
+            unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<[u8; N]>(), v.len() / N) };
+        let Ok(()) = ByteSink::write_swapped_slice(&mut self.0.vec, &[], elems, |mut e| {
+            e.reverse();
+            e
+        });
+        Ok(())
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        Err(raw_payload_misuse())
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        Err(raw_payload_misuse())
+    }
+}
+
+impl<O: ByteOrder> ser::SerializeSeq for RawPayloadSink<'_, O> {
+    type Ok = ();
+    type Error = Error;
+
+    #[inline(always)]
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
+        value.serialize(RawPayloadSink(&mut *self.0))
+    }
+
+    #[inline(always)]
+    fn end(self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// NBT map serializer writing entries to a `TAG_Compound`.
 pub struct MapSerializer<'a, O: ByteOrder = BigEndian> {
     tag_pos: usize,
@@ -1195,6 +1459,7 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<()> {
         debug_assert_eq!(self.tag_pos, usize::MAX);
         self.tag_pos = self.serializer.vec.len();
@@ -1204,9 +1469,10 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
         })
     }
 
+    #[inline]
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         debug_assert_ne!(self.tag_pos, usize::MAX);
-        let tag_id = tag_of(value);
+        let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
             return Err(Error::INVALID(0));
@@ -1216,13 +1482,14 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
         value.serialize(&mut *self.serializer)
     }
 
+    #[inline]
     fn serialize_entry<K: ?Sized + Serialize, V: ?Sized + Serialize>(
         &mut self,
         key: &K,
         value: &V,
     ) -> Result<()> {
         debug_assert_eq!(self.tag_pos, usize::MAX);
-        let tag_id = tag_of(value);
+        let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
             return Err(Error::INVALID(0));
@@ -1234,6 +1501,7 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
         value.serialize(&mut *self.serializer)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
         self.serializer.vec.push(TagID::End as u8);
         Ok(())
@@ -1244,6 +1512,7 @@ impl<O: ByteOrder> ser::SerializeStruct for &mut Serializer<O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(
         &mut self,
         key: &'static str,
@@ -1252,6 +1521,7 @@ impl<O: ByteOrder> ser::SerializeStruct for &mut Serializer<O> {
         self.write_compound_item(key, value)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
         self.vec.push(TagID::End as u8);
         Ok(())

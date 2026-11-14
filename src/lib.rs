@@ -148,12 +148,12 @@ mod write;
 
 pub use error::{Error, Result};
 pub use index::{AsKey, Index};
+#[cfg(feature = "serde")]
+pub(crate) use mutf8::decode_mutf8_lossy;
 pub(crate) use mutf8::{
     cold_path, key_eq, same_byte_order, with_mutf8_key, EMPTY_COMPOUND, EMPTY_LIST,
     EMPTY_TYPED_LISTS,
 };
-#[cfg(feature = "serde")]
-pub(crate) use mutf8::{decode_mutf8_lossy, encode_mutf8};
 pub use mutf8::{ByteOrder, MUTF8Str, MUTF8String};
 pub use owned::{
     compound::{Compound, CompoundIterMut},

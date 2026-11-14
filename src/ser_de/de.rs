@@ -173,6 +173,7 @@ macro_rules! impl_parse_endian {
 impl<'de, O: ByteOrder> Deserializer<'de, O> {
     /// Parses the root tag header (`[tag_id][name_len][name]`, or `[0]` for `TAG_End`) and
     /// advances to the root value's payload.
+    #[inline]
     pub fn from_slice(input: &'de [u8]) -> Result<Self> {
         check_bounds!(1, input);
         let tag_id = TagID::from_u8(input[0])?;
@@ -195,6 +196,7 @@ impl<'de, O: ByteOrder> Deserializer<'de, O> {
     }
 
     /// Parses a nameless root tag header (`[tag_id]`) and advances to the root value's payload.
+    #[inline]
     pub fn from_slice_nameless(input: &'de [u8]) -> Result<Self> {
         check_bounds!(1, input);
         let tag_id = TagID::from_u8(input[0])?;
@@ -251,6 +253,7 @@ impl<'de, O: ByteOrder> Deserializer<'de, O> {
         check_bounds!(2 + len, self.input);
         let raw = &self.input[2..2 + len];
         self.input = &self.input[2 + len..];
+        unsafe { assert_unchecked(raw.len() <= u16::MAX as usize) };
         Ok(raw)
     }
 
@@ -530,10 +533,12 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         })
     }
 
+    #[inline]
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         self.deserialize_str(visitor)
     }
 
+    #[inline]
     fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         check_tag!(TagID::Compound, self.current_tag, {
             check_bounds!(1, self.input);
@@ -561,6 +566,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         })
     }
 
+    #[inline]
     fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         check_tag!(TagID::Compound, self.current_tag, {
             self.consume_end_tag()?;
@@ -568,6 +574,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         })
     }
 
+    #[inline]
     fn deserialize_unit_struct<V: de::Visitor<'de>>(
         self,
         _name: &'static str,
@@ -576,6 +583,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         self.deserialize_unit(visitor)
     }
 
+    #[inline]
     fn deserialize_newtype_struct<V: de::Visitor<'de>>(
         self,
         name: &'static str,
@@ -604,6 +612,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         }
     }
 
+    #[inline]
     fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         match self.current_tag {
             TagID::IntArray => self.visit_fixed_array::<PrimInt, V>(visitor),
@@ -634,12 +643,14 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         self.deserialize_tuple(len, visitor)
     }
 
+    #[inline]
     fn deserialize_map<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         check_tag!(TagID::Compound, self.current_tag, {
             visitor.visit_map(CompoundAccess { deserializer: self })
         })
     }
 
+    #[inline]
     fn deserialize_struct<V: de::Visitor<'de>>(
         self,
         _name: &'static str,
@@ -668,6 +679,7 @@ impl<'de, O: ByteOrder> de::Deserializer<'de> for &mut Deserializer<'de, O> {
         }
     }
 
+    #[inline]
     fn deserialize_identifier<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         visit_cow_str(self.parse_str()?, visitor)
     }
@@ -1281,6 +1293,7 @@ struct ArrayAccess<'a, 'de: 'a, O: ByteOrder> {
 impl<'de, O: ByteOrder> SeqAccess<'de> for ArrayAccess<'_, 'de, O> {
     type Error = Error;
 
+    #[inline]
     fn next_element_seed<T: de::DeserializeSeed<'de>>(
         &mut self,
         seed: T,
@@ -1293,6 +1306,7 @@ impl<'de, O: ByteOrder> SeqAccess<'de> for ArrayAccess<'_, 'de, O> {
         seed.deserialize(&mut *self.deserializer).map(Some)
     }
 
+    #[inline]
     fn size_hint(&self) -> Option<usize> {
         Some(self.remaining as usize)
     }
@@ -1305,6 +1319,7 @@ struct CompoundAccess<'a, 'de: 'a, O: ByteOrder> {
 impl<'de, O: ByteOrder> MapAccess<'de> for CompoundAccess<'_, 'de, O> {
     type Error = Error;
 
+    #[inline]
     fn next_key_seed<K: de::DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>> {
         check_bounds!(1, self.deserializer.input);
         self.deserializer.current_tag = TagID::from_u8(self.deserializer.input[0])?;
@@ -1316,6 +1331,7 @@ impl<'de, O: ByteOrder> MapAccess<'de> for CompoundAccess<'_, 'de, O> {
         seed.deserialize(KeyDeserializer::from_raw(raw)).map(Some)
     }
 
+    #[inline]
     fn next_value_seed<V: de::DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value> {
         seed.deserialize(&mut *self.deserializer)
     }

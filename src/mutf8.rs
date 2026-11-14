@@ -167,8 +167,7 @@ pub(crate) fn decode_mutf8_lossy(bytes: &[u8]) -> Cow<'_, str> {
 }
 
 #[inline(always)]
-#[cfg(feature = "serde")]
-pub(crate) fn encode_mutf8(value: &str) -> Cow<'_, [u8]> {
+fn encode_mutf8(value: &str) -> Cow<'_, [u8]> {
     let bytes = value.as_bytes();
     if (bytes.len() < 64 && is_strict_mutf8_ascii_under_64(bytes))
         || !simd_cesu8::mutf8::needs_encoded(value)

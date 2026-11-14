@@ -2,7 +2,7 @@ use std::{fmt, marker::PhantomData};
 
 use serde::{
     de::{self, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor},
-    ser::SerializeMap,
+    ser::{SerializeMap, SerializeSeq},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use zerocopy::{byteorder, BigEndian, LittleEndian};
@@ -18,7 +18,12 @@ use crate::{
     TypedListRef, Value, ValueMut, ValueRef,
 };
 
-use super::EMPTY_LIST_MARKERS;
+use super::{
+    ser::{native_target, RAW_PAYLOAD, RAW_SWAP},
+    tag_probe::{is_tag_probe, PROBE_COMPOUND_HINT, PROBE_LIST_HINT},
+    EMPTY_LIST_MARKERS,
+};
+use crate::write::ByteSink;
 
 // ============================================================================
 // MUTF8Str & MUTF8String
@@ -62,11 +67,17 @@ impl<'de: 'a, 'a> Visitor<'de> for Mutf8StrVisitor<'a> {
 
     #[inline]
     fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
+        if v.len() > MUTF8String::MAX_LEN {
+            return Err(map_nbt_err(Error::LEN(v.len())));
+        }
         Ok(unsafe { MUTF8Str::from_mutf8_unchecked(v) })
     }
 
     #[inline]
     fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+        if v.len() > MUTF8String::MAX_LEN {
+            return Err(map_nbt_err(Error::LEN(v.len())));
+        }
         if !v.bytes().any(|b| b == 0 || b >= 0xF0) {
             Ok(unsafe { MUTF8Str::from_mutf8_unchecked(v.as_bytes()) })
         } else {
@@ -152,6 +163,253 @@ impl<'de> Deserialize<'de> for MUTF8String {
 // DOM Serialization
 // ============================================================================
 
+// Fast path into na_nbt's own `Serializer`: once `native_target::<S>()` has identified it, the
+// DOM value is written by the regular tree writer (`Source::write_*_with_header`) and the bytes
+// are streamed through ordinary `serde::Serializer` calls under the private `RAW_PAYLOAD`
+// newtype. No downcast is involved, and every other serializer keeps the structured path.
+
+struct RawChunk<'a>(&'a [u8]);
+
+impl Serialize for RawChunk<'_> {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+struct RawSwapped<'a>(&'static str, &'a [u8]);
+
+impl Serialize for RawSwapped<'_> {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_newtype_struct(self.0, &RawChunk(self.1))
+    }
+}
+
+struct RawReserve(usize);
+
+impl Serialize for RawReserve {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0 as u64)
+    }
+}
+
+struct RawLengthOverflow(usize);
+
+impl Serialize for RawLengthOverflow {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i64(self.0 as i64)
+    }
+}
+
+struct RawByte(u8);
+
+impl Serialize for RawByte {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(self.0)
+    }
+}
+
+struct RawU16([u8; 2]);
+
+impl Serialize for RawU16 {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(u16::from_ne_bytes(self.0))
+    }
+}
+
+struct RawU32([u8; 4]);
+
+impl Serialize for RawU32 {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(u32::from_ne_bytes(self.0))
+    }
+}
+
+/// [`ByteSink`] over the `RAW_PAYLOAD` sequence.
+struct SeqSink<'a, M>(&'a mut M);
+
+impl<M: SerializeSeq> SeqSink<'_, M> {
+    #[inline(always)]
+    fn chunk(&mut self, bytes: &[u8]) -> Result<(), M::Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.0.serialize_element(&RawChunk(bytes))
+    }
+}
+
+impl<M: SerializeSeq> ByteSink for SeqSink<'_, M> {
+    type Error = M::Error;
+
+    #[inline(always)]
+    fn reserve(&mut self, additional: usize) {
+        let _ = self.0.serialize_element(&RawReserve(additional));
+    }
+
+    #[inline(always)]
+    fn write_byte(&mut self, b: u8) -> Result<(), M::Error> {
+        self.0.serialize_element(&RawByte(b))
+    }
+
+    #[inline(always)]
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), M::Error> {
+        self.chunk(bytes)
+    }
+
+    #[inline(always)]
+    fn write_2(&mut self, a: &[u8], b: &[u8]) -> Result<(), M::Error> {
+        if a.is_empty() {
+            return self.chunk(b);
+        }
+        if b.is_empty() {
+            return self.chunk(a);
+        }
+        self.reserve(a.len() + b.len());
+        self.chunk(a)?;
+        self.chunk(b)
+    }
+
+    #[inline(always)]
+    fn write_3(&mut self, a: &[u8], b: &[u8], c: &[u8]) -> Result<(), M::Error> {
+        self.reserve(a.len() + b.len() + c.len());
+        self.chunk(a)?;
+        self.chunk(b)?;
+        self.chunk(c)
+    }
+
+    #[inline(always)]
+    fn write_u16_bytes(&mut self, hdr: [u8; 2], body: &[u8]) -> Result<(), M::Error> {
+        self.reserve(2 + body.len());
+        self.0.serialize_element(&RawU16(hdr))?;
+        self.chunk(body)
+    }
+
+    #[inline(always)]
+    fn write_prefixed_u16(
+        &mut self,
+        prefix: &[u8],
+        hdr: [u8; 2],
+        body: &[u8],
+    ) -> Result<(), M::Error> {
+        self.reserve(prefix.len() + 2 + body.len());
+        self.chunk(prefix)?;
+        self.0.serialize_element(&RawU16(hdr))?;
+        self.chunk(body)
+    }
+
+    #[inline(always)]
+    fn write_u32_bytes(&mut self, hdr: [u8; 4], body: &[u8]) -> Result<(), M::Error> {
+        self.reserve(4 + body.len());
+        self.0.serialize_element(&RawU32(hdr))?;
+        self.chunk(body)
+    }
+
+    #[inline(always)]
+    fn write_prefixed_u32(
+        &mut self,
+        prefix: &[u8],
+        hdr: [u8; 4],
+        body: &[u8],
+    ) -> Result<(), M::Error> {
+        self.reserve(prefix.len() + 4 + body.len());
+        self.chunk(prefix)?;
+        self.0.serialize_element(&RawU32(hdr))?;
+        self.chunk(body)
+    }
+
+    #[inline]
+    fn write_swapped_slice<const N: usize>(
+        &mut self,
+        prefix: &[u8],
+        src: &[[u8; N]],
+        swap: impl Fn([u8; N]) -> [u8; N],
+    ) -> Result<(), M::Error> {
+        self.reserve(prefix.len() + src.len() * N);
+        self.chunk(prefix)?;
+        // Byte-order swaps are plain byte reversals: let the serializer do them in place.
+        let probe: [u8; N] = core::array::from_fn(|i| i as u8);
+        let mut reversed = probe;
+        reversed.reverse();
+        let swap_name = match N {
+            2 => Some(RAW_SWAP[0]),
+            4 => Some(RAW_SWAP[1]),
+            8 => Some(RAW_SWAP[2]),
+            _ => None,
+        };
+        if let Some(name) = swap_name.filter(|_| swap(probe) == reversed) {
+            if src.is_empty() {
+                return Ok(());
+            }
+            return self
+                .0
+                .serialize_element(&RawSwapped(name, src.as_flattened()));
+        }
+        let mut buf = [[0u8; N]; 64];
+        for block in src.chunks(64) {
+            for (dst, &elem) in buf.iter_mut().zip(block) {
+                *dst = swap(elem);
+            }
+            self.chunk(buf[..block.len()].as_flattened())?;
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn length_overflow(&mut self, len: usize) -> M::Error {
+        match self.0.serialize_element(&RawLengthOverflow(len)) {
+            Err(e) => e,
+            Ok(()) => <M::Error as serde::ser::Error>::custom(Error::LEN(len)),
+        }
+    }
+}
+
+struct RawCompound<'a, Src: Source, T: ByteOrder>(CompoundRef<'a, Src>, PhantomData<T>);
+
+impl<Src: Source, T: ByteOrder> Serialize for RawCompound<'_, Src, T> {
+    #[inline]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(None)?;
+        let mut sink = SeqSink(&mut seq);
+        Src::write_compound_with_header::<T, _>(&[], self.0.cursor, &mut sink)?;
+        seq.end()
+    }
+}
+
+struct RawList<'a, Src: Source, T: ByteOrder>(ListRef<'a, Src>, PhantomData<T>);
+
+impl<Src: Source, T: ByteOrder> Serialize for RawList<'_, Src, T> {
+    #[inline]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(None)?;
+        let mut sink = SeqSink(&mut seq);
+        Src::write_list_with_header::<T, _>(&[], self.0.cursor, &mut sink)?;
+        seq.end()
+    }
+}
+
+/// Writes a non-empty list through the raw fast path if `S` is na_nbt's own serializer.
+#[inline(always)]
+fn try_raw_list<Src: Source, S: Serializer>(
+    list: ListRef<'_, Src>,
+    serializer: S,
+) -> Result<Result<S::Ok, S::Error>, S> {
+    match native_target::<S>() {
+        Some(true) => Ok(serializer
+            .serialize_newtype_struct(RAW_PAYLOAD, &RawList::<Src, BigEndian>(list, PhantomData))),
+        Some(false) => Ok(serializer.serialize_newtype_struct(
+            RAW_PAYLOAD,
+            &RawList::<Src, LittleEndian>(list, PhantomData),
+        )),
+        None => Err(serializer),
+    }
+}
+
 struct CompoundMap<'a, S: Source>(CompoundRef<'a, S>);
 
 impl<Src: Source> Serialize for CompoundMap<'_, Src> {
@@ -168,18 +426,43 @@ impl<Src: Source> Serialize for CompoundMap<'_, Src> {
 impl<Src: Source> Serialize for CompoundRef<'_, Src> {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_newtype_struct("na_nbt:compound", &CompoundMap(*self))
+        if is_tag_probe::<S>() {
+            return serializer.serialize_newtype_struct(
+                PROBE_COMPOUND_HINT,
+                &RawReserve(Src::compound_size_hint(self.cursor)),
+            );
+        }
+        match native_target::<S>() {
+            Some(true) => serializer.serialize_newtype_struct(
+                RAW_PAYLOAD,
+                &RawCompound::<Src, BigEndian>(*self, PhantomData),
+            ),
+            Some(false) => serializer.serialize_newtype_struct(
+                RAW_PAYLOAD,
+                &RawCompound::<Src, LittleEndian>(*self, PhantomData),
+            ),
+            None => serializer.serialize_newtype_struct("na_nbt:compound", &CompoundMap(*self)),
+        }
     }
 }
 
 impl<Src: Source> Serialize for ListRef<'_, Src> {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if is_tag_probe::<S>() {
+            return serializer.serialize_newtype_struct(
+                PROBE_LIST_HINT,
+                &RawReserve(Src::list_size_hint(self.cursor)),
+            );
+        }
         if self.is_empty() {
             let marker = EMPTY_LIST_MARKERS[self.element_tag_id() as usize];
             serializer.serialize_newtype_struct(marker, &[0u8; 0])
         } else {
-            crate::list::serialize(*self, serializer)
+            match try_raw_list(*self, serializer) {
+                Ok(done) => done,
+                Err(serializer) => crate::list::serialize(*self, serializer),
+            }
         }
     }
 }
@@ -187,11 +470,20 @@ impl<Src: Source> Serialize for ListRef<'_, Src> {
 impl<T: ?Sized + ElementTag, Src: Source> Serialize for TypedListRef<'_, T, Src> {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if is_tag_probe::<S>() {
+            return serializer.serialize_newtype_struct(
+                PROBE_LIST_HINT,
+                &RawReserve(Src::list_size_hint(self.cursor)),
+            );
+        }
         if self.is_empty() {
             let marker = EMPTY_LIST_MARKERS[T::TAG_ID as usize];
             serializer.serialize_newtype_struct(marker, &[0u8; 0])
         } else {
-            crate::list::serialize(self.as_list(), serializer)
+            match try_raw_list(self.as_list(), serializer) {
+                Ok(done) => done,
+                Err(serializer) => crate::list::serialize(self.as_list(), serializer),
+            }
         }
     }
 }
@@ -220,6 +512,26 @@ impl<Src: Source> Serialize for ValueRef<'_, Src> {
 impl<O: ByteOrder, B: AsRef<[u8]>> Serialize for Document<O, B> {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if is_tag_probe::<S>() {
+            let (tag, payload) = self.raw_root_parts();
+            match tag {
+                TagID::Compound => {
+                    return serializer
+                        .serialize_newtype_struct(PROBE_COMPOUND_HINT, &RawReserve(payload.len()));
+                }
+                TagID::List => {
+                    return serializer
+                        .serialize_newtype_struct(PROBE_LIST_HINT, &RawReserve(payload.len()));
+                }
+                _ => {}
+            }
+        }
+        if native_target::<S>() == Some(const { same_byte_order::<O, BigEndian>() }) {
+            let (tag, payload) = self.raw_root_parts();
+            if tag != TagID::End {
+                return serializer.serialize_newtype_struct(RAW_PAYLOAD, &RawChunk(payload));
+            }
+        }
         self.root().serialize(serializer)
     }
 }
@@ -333,6 +645,7 @@ impl<'de: 'a, 'a, O: ByteOrder> Visitor<'de> for BorrowedDocVisitor<'a, O> {
         f.write_str("a borrowed NBT value")
     }
 
+    #[inline]
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         finish_raw_nbt(data, |tag_id, wire_is_be, input| {
             let target_is_be = const { same_byte_order::<O, BigEndian>() };
@@ -356,6 +669,7 @@ impl<'de: 'a, 'a, O: ByteOrder> Visitor<'de> for BorrowedDocVisitor<'a, O> {
             let mut marks = RawSmallMarks::with_payload_tag(tag);
             let consumed =
                 parse_marks_payload::<O>(tag_id, input, &mut marks).map_err(map_nbt_err)?;
+            unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
             Ok((
                 Document {
                     data: &input[..consumed],
@@ -390,6 +704,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for ValueVisitor<O> {
         f.write_str("any NBT value")
     }
 
+    #[inline]
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         finish_raw_nbt(data, |tag_id, wire_is_be, input| {
             if tag_id == 0 {
@@ -406,6 +721,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for ValueVisitor<O> {
             }
             .map_err(map_nbt_err)?;
             let consumed = (pos as usize) - (input.as_ptr() as usize);
+            unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
             Ok((val, consumed))
         })
     }
@@ -551,6 +867,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for CompoundVisitor<O> {
         f.write_str("an NBT Compound")
     }
 
+    #[inline]
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         finish_raw_nbt(data, |tag_id, wire_is_be, input| {
             let actual = TagID::from_u8(tag_id).map_err(map_nbt_err)?;
@@ -571,6 +888,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for CompoundVisitor<O> {
             }
             .map_err(map_nbt_err)?;
             let consumed = (pos as usize) - (input.as_ptr() as usize);
+            unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
             Ok((comp, consumed))
         })
     }
@@ -612,6 +930,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for ListVisitor<O> {
         f.write_str("an NBT List")
     }
 
+    #[inline]
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         finish_raw_nbt(data, |tag_id, wire_is_be, input| {
             let actual = TagID::from_u8(tag_id).map_err(map_nbt_err)?;
@@ -632,6 +951,7 @@ impl<'de, O: ByteOrder> Visitor<'de> for ListVisitor<O> {
             }
             .map_err(map_nbt_err)?;
             let consumed = (pos as usize) - (input.as_ptr() as usize);
+            unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
             Ok((list, consumed))
         })
     }
@@ -708,6 +1028,7 @@ impl<'de, T: ?Sized + ElementTag, O: ByteOrder> Visitor<'de> for TypedListVisito
         write!(f, "an NBT List of {:?}", T::TAG_ID)
     }
 
+    #[inline]
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         finish_raw_nbt(data, |tag_id, wire_is_be, input| {
             let actual = TagID::from_u8(tag_id).map_err(map_nbt_err)?;
@@ -745,6 +1066,7 @@ impl<'de, T: ?Sized + ElementTag, O: ByteOrder> Visitor<'de> for TypedListVisito
             }
             .map_err(map_nbt_err)?;
             let consumed = (pos as usize) - (input.as_ptr() as usize);
+            unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
             let typed = unsafe { list.into_typed_unchecked::<T>() };
             Ok((typed, consumed))
         })

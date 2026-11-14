@@ -16,7 +16,7 @@ rust-version = "1.87"
 default = ["serde", "shared", "i128"]
 nightly = ["simd_cesu8/nightly"]
 # Enable serde serialization/deserialization support
-serde = ["dep:serde", "dep:base64ct"]
+serde = ["dep:serde", "dep:base64ct", "dep:typeid"]
 # Enable SharedDocument with Arc ownership (requires bytes crate)
 shared = ["dep:bytes"]
 # Enable i128/u128 serialization support
@@ -28,6 +28,8 @@ zerocopy = "0.8"
 # Optional: for serde support
 serde = { version = "1.0", optional = true }
 base64ct = { version = "1.8", features = ["std", "alloc"], optional = true }
+# Optional: lets DOM `Serialize` impls recognise this crate's own serializer (lifetime-erased TypeId)
+typeid = { version = "1.0", optional = true }
 # Optional: for SharedDocument (Arc-based zero-copy)
 bytes = { version = "1.11", optional = true }
 
@@ -46,6 +48,10 @@ required-features = ["serde"]
 
 [[test]]
 name = "read_write"
+required-features = ["serde", "shared"]
+
+[[test]]
+name = "serde_dom_fast_path"
 required-features = ["serde", "shared"]
 
 [[example]]
