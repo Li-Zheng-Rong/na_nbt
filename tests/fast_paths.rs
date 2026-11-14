@@ -394,3 +394,29 @@ fn strings_cannot_grow_past_max_len() {
     let doc = read_borrowed_be(&bytes).unwrap();
     assert_eq!(doc.get_string("s").unwrap().len(), MAX);
 }
+
+#[test]
+fn document_buffer_accepts_standard_immutable_containers() {
+    let mut comp = Compound::<BigEndian>::new();
+    comp.insert("k", 123i32);
+    let raw = comp.write_to_vec_be();
+
+    let d_vec = na_nbt::read_document::<BigEndian, Vec<u8>>(raw.clone()).unwrap();
+    let d_ref_vec = na_nbt::read_document::<BigEndian, &Vec<u8>>(&raw).unwrap();
+    let d_box =
+        na_nbt::read_document::<BigEndian, Box<[u8]>>(raw.clone().into_boxed_slice()).unwrap();
+    let d_arc =
+        na_nbt::read_document::<BigEndian, std::sync::Arc<[u8]>>(raw.clone().into()).unwrap();
+    let d_rc = na_nbt::read_document::<BigEndian, std::rc::Rc<[u8]>>(raw.clone().into()).unwrap();
+    let d_cow = na_nbt::read_document::<BigEndian, std::borrow::Cow<'_, [u8]>>(
+        std::borrow::Cow::Borrowed(&raw),
+    )
+    .unwrap();
+
+    assert_eq!(d_vec, d_ref_vec);
+    assert_eq!(d_vec, d_box);
+    assert_eq!(d_vec, d_arc);
+    assert_eq!(d_vec, d_rc);
+    assert_eq!(d_vec, d_cow);
+    assert_eq!(d_vec.get_int("k"), Some(123));
+}

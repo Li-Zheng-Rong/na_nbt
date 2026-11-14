@@ -10,7 +10,7 @@ documentation = "https://docs.rs/na_nbt"
 readme = "README.md"
 keywords = ["nbt", "minecraft", "binary", "serialization", "serde"]
 categories = ["encoding", "game-development", "parser-implementations"]
-rust-version = "1.87"
+rust-version = "1.88"
 
 [features]
 default = ["serde", "shared", "i128"]

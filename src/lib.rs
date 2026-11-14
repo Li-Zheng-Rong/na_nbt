@@ -172,7 +172,7 @@ pub use read::{
         AsCompoundRef, AsListRef, AsValueRef, CompoundIter, CompoundRef, ListIter, ListKind,
         ListRef, TypedListIter, TypedListRef, ValueRef,
     },
-    BorrowedDocument, Document,
+    BorrowedDocument, Document, DocumentBuffer,
 };
 #[cfg(feature = "shared")]
 pub use read::{

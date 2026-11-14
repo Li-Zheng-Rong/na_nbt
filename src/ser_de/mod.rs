@@ -37,6 +37,6 @@ pub use ser::{
     to_vec, to_vec_be, to_vec_le, to_vec_named, to_vec_named_be, to_vec_named_le, to_vec_nameless,
     to_vec_nameless_be, to_vec_nameless_le, to_writer, to_writer_be, to_writer_le, to_writer_named,
     to_writer_named_be, to_writer_named_le, to_writer_nameless, to_writer_nameless_be,
-    to_writer_nameless_le, MapSerializer, SeqSerializer, Serializer,
+    to_writer_nameless_le, MapSerializer, SeqSerializer, Serializer, TupleSerializer,
 };
 pub use tag_probe::tag_of;

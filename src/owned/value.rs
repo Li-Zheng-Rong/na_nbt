@@ -1346,7 +1346,7 @@ impl<O: ByteOrder, S: crate::Source> PartialEq<ValueRef<'_, S>> for Value<O> {
     }
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> PartialEq<crate::Document<O, B>> for Value<O> {
+impl<O: ByteOrder, B: crate::DocumentBuffer> PartialEq<crate::Document<O, B>> for Value<O> {
     #[inline]
     fn eq(&self, other: &crate::Document<O, B>) -> bool {
         self.as_ref() == other.root()

@@ -141,9 +141,9 @@ fn is_strict_mutf8_ascii_under_64(bytes: &[u8]) -> bool {
     if bytes[0].wrapping_sub(1) >= 0x7F {
         return false;
     }
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+    let (chunks, _) = bytes.as_chunks::<8>();
+    for &chunk in chunks {
+        let word = u64::from_ne_bytes(chunk);
         if ((word | word.wrapping_sub(0x0101_0101_0101_0101)) & 0x8080_8080_8080_8080) != 0 {
             return false;
         }
@@ -221,7 +221,12 @@ pub(crate) static EMPTY_TYPED_LISTS: [[u8; 5]; 13] = [
     [12, 0, 0, 0, 0],
 ];
 
-/// A MUTF-8 (Modified UTF-8) encoded string slice.
+/// An NBT string byte slice (nominally Modified UTF-8).
+///
+/// Zero-copy views and byte-slice compound keys wrap raw wire bytes without upfront encoding
+/// validation; [`decode`](Self::decode), [`decode_strict`](Self::decode_strict), and lossy
+/// helpers validate or replace invalid sequences on demand, so arbitrary bytes never cause
+/// undefined behavior.
 #[repr(transparent)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MUTF8Str([u8]);
@@ -264,7 +269,9 @@ impl MUTF8Str {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `bytes` contains valid MUTF-8 encoded data.
+    /// Callers expecting strict MUTF-8 semantics should pass valid MUTF-8 encoded data. Passing
+    /// arbitrary bytes does not cause memory unsafety (`MUTF8Str` validates on decode, and parsed
+    /// NBT wire strings / raw byte keys may contain arbitrary bytes).
     ///
     /// ```
     /// use na_nbt::MUTF8Str;
@@ -404,7 +411,9 @@ impl MUTF8String {
     ///
     /// # Safety
     ///
-    /// `bytes` must contain valid MUTF-8 encoded data.
+    /// Callers expecting strict MUTF-8 semantics should pass valid MUTF-8 encoded data. Arbitrary
+    /// bytes with `bytes.len() <= MAX_LEN` do not cause memory unsafety (`MUTF8String` validates
+    /// on decode).
     #[inline]
     #[track_caller]
     pub const unsafe fn from_mutf8_unchecked(bytes: Vec<u8>) -> Self {

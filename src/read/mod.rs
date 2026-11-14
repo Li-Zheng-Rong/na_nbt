@@ -22,6 +22,27 @@ use crate::{
 #[cfg(feature = "serde")]
 pub(crate) use parser::{parse_marks_payload, SmallMarks as RawSmallMarks};
 
+/// Marker trait for immutable byte buffers whose [`AsRef::as_ref`] slice is stable for the
+/// lifetime of a [`Document`].
+///
+/// # Safety
+///
+/// Implementations must guarantee that repeated calls to `self.as_ref()` without intervening
+/// `&mut self` access always return a byte slice with the exact same length and byte contents.
+pub unsafe trait DocumentBuffer: AsRef<[u8]> {}
+
+unsafe impl DocumentBuffer for [u8] {}
+unsafe impl<const N: usize> DocumentBuffer for [u8; N] {}
+unsafe impl DocumentBuffer for Vec<u8> {}
+unsafe impl DocumentBuffer for Box<[u8]> {}
+unsafe impl DocumentBuffer for std::rc::Rc<[u8]> {}
+unsafe impl DocumentBuffer for std::sync::Arc<[u8]> {}
+unsafe impl DocumentBuffer for std::borrow::Cow<'_, [u8]> {}
+unsafe impl DocumentBuffer for crate::MUTF8String {}
+#[cfg(feature = "shared")]
+unsafe impl DocumentBuffer for bytes::Bytes {}
+unsafe impl<T: DocumentBuffer + ?Sized> DocumentBuffer for &T {}
+
 /// A zero-copy parsed NBT document backed by buffer `B` (`&[u8]`, `bytes::Bytes`, `Vec<u8>`, etc.).
 ///
 /// Small NBT documents with up to 8 `Compound`/`List` containers store their structural index
@@ -79,9 +100,9 @@ pub fn read_borrowed_nameless_le(source: &[u8]) -> Result<BorrowedDocument<'_, L
     read_document_nameless::<LittleEndian, &[u8]>(source)
 }
 
-/// Parses an NBT document from any buffer implementing `AsRef<[u8]>`.
+/// Parses an NBT document from any buffer implementing [`DocumentBuffer`].
 #[inline]
-pub fn read_document<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document<O, B>> {
+pub fn read_document<O: ByteOrder, B: DocumentBuffer>(source: B) -> Result<Document<O, B>> {
     let mut marks = SmallMarks::new();
     parse_marks::<O, false>(source.as_ref(), &mut marks)?;
     Ok(Document {
@@ -92,9 +113,11 @@ pub fn read_document<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document
 }
 
 /// Parses a nameless root NBT document (`[tag_id][payload]`, Minecraft 1.20.2+ network format)
-/// from any buffer implementing `AsRef<[u8]>`.
+/// from any buffer implementing [`DocumentBuffer`].
 #[inline]
-pub fn read_document_nameless<O: ByteOrder, B: AsRef<[u8]>>(source: B) -> Result<Document<O, B>> {
+pub fn read_document_nameless<O: ByteOrder, B: DocumentBuffer>(
+    source: B,
+) -> Result<Document<O, B>> {
     let mut marks = SmallMarks::with_nameless(true);
     parse_marks::<O, true>(source.as_ref(), &mut marks)?;
     Ok(Document {
@@ -146,7 +169,7 @@ pub fn read_shared_nameless_le(source: bytes::Bytes) -> Result<SharedDocument<Li
     read_document_nameless::<LittleEndian, bytes::Bytes>(source)
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
+impl<O: ByteOrder, B: DocumentBuffer> Document<O, B> {
     /// Returns the root tag's MUTF-8 name, or `None` if the document is nameless or `TAG_End`.
     #[inline]
     pub fn root_name(&self) -> Option<&MUTF8Str> {
@@ -493,13 +516,13 @@ impl<O: ByteOrder, B: AsRef<[u8]>> Document<O, B> {
     impl_inherent_write_common_methods!();
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> fmt::Debug for Document<O, B> {
+impl<O: ByteOrder, B: DocumentBuffer> fmt::Debug for Document<O, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.root(), f)
     }
 }
 
-impl<O: ByteOrder, B1: AsRef<[u8]>, B2: AsRef<[u8]>> PartialEq<Document<O, B2>>
+impl<O: ByteOrder, B1: DocumentBuffer, B2: DocumentBuffer> PartialEq<Document<O, B2>>
     for Document<O, B1>
 {
     #[inline]
@@ -508,14 +531,14 @@ impl<O: ByteOrder, B1: AsRef<[u8]>, B2: AsRef<[u8]>> PartialEq<Document<O, B2>>
     }
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>, S: Source> PartialEq<ValueRef<'_, S>> for Document<O, B> {
+impl<O: ByteOrder, B: DocumentBuffer, S: Source> PartialEq<ValueRef<'_, S>> for Document<O, B> {
     #[inline]
     fn eq(&self, other: &ValueRef<'_, S>) -> bool {
         self.root() == *other
     }
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> PartialEq<crate::Value<O>> for Document<O, B> {
+impl<O: ByteOrder, B: DocumentBuffer> PartialEq<crate::Value<O>> for Document<O, B> {
     #[inline]
     fn eq(&self, other: &crate::Value<O>) -> bool {
         self.root() == other.as_ref()
@@ -865,7 +888,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     }
 
     #[inline]
-    fn compound_to_owned<TARGET: ByteOrder>(
+    unsafe fn compound_to_owned<TARGET: ByteOrder>(
         cursor: Self::CompoundCursor<'_>,
     ) -> crate::Compound<TARGET> {
         // `cursor.data` is exactly one compound payload that `parse_marks` already validated, so
@@ -882,7 +905,9 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     }
 
     #[inline]
-    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> crate::List<TARGET> {
+    unsafe fn list_to_owned<TARGET: ByteOrder>(
+        cursor: Self::ListCursor<'_>,
+    ) -> crate::List<TARGET> {
         let range = cursor.data.as_ptr_range();
         let mut pos = range.start;
         match unsafe { read_list::<O, TARGET>(&mut pos, range.end) } {
@@ -895,17 +920,17 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     }
 
     #[inline(always)]
-    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
+    unsafe fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
         cursor.data.len()
     }
 
     #[inline(always)]
-    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
+    unsafe fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
         cursor.data.len()
     }
 
     #[inline(always)]
-    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
         sink: &mut Sink,
@@ -925,7 +950,7 @@ impl<O: ByteOrder> Source for Borrowed<O> {
     }
 
     #[inline(always)]
-    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::ListCursor<'_>,
         sink: &mut Sink,

@@ -12,7 +12,7 @@ use crate::{
         parser::{read_compound, read_list, read_unsafe},
         slot::{Scalar, SlotValue},
     },
-    read::{parse_marks_payload, RawSmallMarks},
+    read::{parse_marks_payload, DocumentBuffer, RawSmallMarks},
     same_byte_order, BorrowedDocument, ByteOrder, Compound, CompoundRef, Document, ElementTag,
     Error, List, ListRef, MUTF8Str, MUTF8String, Mut, ScalarMut, Source, TagID, TypedList,
     TypedListRef, Value, ValueMut, ValueRef,
@@ -376,7 +376,7 @@ impl<Src: Source, T: ByteOrder> Serialize for RawCompound<'_, Src, T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_seq(None)?;
         let mut sink = SeqSink(&mut seq);
-        Src::write_compound_with_header::<T, _>(&[], self.0.cursor, &mut sink)?;
+        unsafe { Src::write_compound_with_header::<T, _>(&[], self.0.cursor, &mut sink)? };
         seq.end()
     }
 }
@@ -388,7 +388,7 @@ impl<Src: Source, T: ByteOrder> Serialize for RawList<'_, Src, T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_seq(None)?;
         let mut sink = SeqSink(&mut seq);
-        Src::write_list_with_header::<T, _>(&[], self.0.cursor, &mut sink)?;
+        unsafe { Src::write_list_with_header::<T, _>(&[], self.0.cursor, &mut sink)? };
         seq.end()
     }
 }
@@ -429,7 +429,7 @@ impl<Src: Source> Serialize for CompoundRef<'_, Src> {
         if is_tag_probe::<S>() {
             return serializer.serialize_newtype_struct(
                 PROBE_COMPOUND_HINT,
-                &RawReserve(Src::compound_size_hint(self.cursor)),
+                &RawReserve(unsafe { Src::compound_size_hint(self.cursor) }),
             );
         }
         match native_target::<S>() {
@@ -452,7 +452,7 @@ impl<Src: Source> Serialize for ListRef<'_, Src> {
         if is_tag_probe::<S>() {
             return serializer.serialize_newtype_struct(
                 PROBE_LIST_HINT,
-                &RawReserve(Src::list_size_hint(self.cursor)),
+                &RawReserve(unsafe { Src::list_size_hint(self.cursor) }),
             );
         }
         if self.is_empty() {
@@ -473,7 +473,7 @@ impl<T: ?Sized + ElementTag, Src: Source> Serialize for TypedListRef<'_, T, Src>
         if is_tag_probe::<S>() {
             return serializer.serialize_newtype_struct(
                 PROBE_LIST_HINT,
-                &RawReserve(Src::list_size_hint(self.cursor)),
+                &RawReserve(unsafe { Src::list_size_hint(self.cursor) }),
             );
         }
         if self.is_empty() {
@@ -509,7 +509,7 @@ impl<Src: Source> Serialize for ValueRef<'_, Src> {
     }
 }
 
-impl<O: ByteOrder, B: AsRef<[u8]>> Serialize for Document<O, B> {
+impl<O: ByteOrder, B: DocumentBuffer> Serialize for Document<O, B> {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if is_tag_probe::<S>() {
@@ -692,6 +692,99 @@ impl<'de: 'a, 'a, O: ByteOrder> Deserialize<'de> for BorrowedDocument<'a, O> {
     #[inline]
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_newtype_struct("na_nbt:raw_nbt", BorrowedDocVisitor(PhantomData))
+    }
+}
+
+#[cfg(feature = "shared")]
+struct SharedDocVisitor<O: ByteOrder>(PhantomData<fn() -> O>);
+
+#[cfg(feature = "shared")]
+impl<'de, O: ByteOrder> Visitor<'de> for SharedDocVisitor<O> {
+    type Value = crate::SharedDocument<O>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an NBT value")
+    }
+
+    #[inline]
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+        finish_raw_nbt(data, |tag_id, wire_is_be, input| {
+            if tag_id == 0 {
+                return Ok((
+                    Document {
+                        data: bytes::Bytes::from_static(&[0]),
+                        marks: RawSmallMarks::with_nameless(true),
+                        _marker: PhantomData,
+                    },
+                    0,
+                ));
+            }
+            let tag = TagID::from_u8(tag_id).map_err(map_nbt_err)?;
+            let target_is_be = const { same_byte_order::<O, BigEndian>() };
+            if wire_is_be == target_is_be {
+                let mut marks = RawSmallMarks::with_payload_tag(tag);
+                let consumed =
+                    parse_marks_payload::<O>(tag_id, input, &mut marks).map_err(map_nbt_err)?;
+                unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
+                return Ok((
+                    Document {
+                        data: bytes::Bytes::copy_from_slice(&input[..consumed]),
+                        marks,
+                        _marker: PhantomData,
+                    },
+                    consumed,
+                ));
+            }
+            let mut wire_marks = RawSmallMarks::with_payload_tag(tag);
+            let (raw_vec, consumed) = if wire_is_be {
+                let consumed = parse_marks_payload::<BigEndian>(tag_id, input, &mut wire_marks)
+                    .map_err(map_nbt_err)?;
+                unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
+                let wire_doc = Document::<BigEndian, &[u8]> {
+                    data: &input[..consumed],
+                    marks: wire_marks,
+                    _marker: PhantomData,
+                };
+                (wire_doc.write_nameless_to_vec::<O>(), consumed)
+            } else {
+                let consumed = parse_marks_payload::<LittleEndian>(tag_id, input, &mut wire_marks)
+                    .map_err(map_nbt_err)?;
+                unsafe { std::hint::assert_unchecked(consumed <= input.len()) };
+                let wire_doc = Document::<LittleEndian, &[u8]> {
+                    data: &input[..consumed],
+                    marks: wire_marks,
+                    _marker: PhantomData,
+                };
+                (wire_doc.write_nameless_to_vec::<O>(), consumed)
+            };
+            let doc = crate::read_shared_nameless::<O>(bytes::Bytes::from(raw_vec))
+                .map_err(map_nbt_err)?;
+            Ok((doc, consumed))
+        })
+    }
+
+    fn visit_newtype_struct<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        let val = ValueVisitor::<O>(PhantomData).visit_newtype_struct(deserializer)?;
+        if matches!(val, Value::End) {
+            return Ok(Document {
+                data: bytes::Bytes::from_static(&[0]),
+                marks: RawSmallMarks::with_nameless(true),
+                _marker: PhantomData,
+            });
+        }
+        crate::read_shared_nameless::<O>(bytes::Bytes::from(val.write_nameless_to_vec::<O>()))
+            .map_err(map_nbt_err)
+    }
+}
+
+#[cfg(feature = "shared")]
+impl<'de, O: ByteOrder> Deserialize<'de> for crate::SharedDocument<O> {
+    #[inline]
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_newtype_struct("na_nbt:raw_nbt", SharedDocVisitor(PhantomData))
     }
 }
 

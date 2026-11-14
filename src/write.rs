@@ -116,6 +116,20 @@ fn string_overflow_panic(len: usize) -> ! {
     )
 }
 
+#[inline(always)]
+fn checked_len_add3(a: usize, b: usize, c: usize) -> usize {
+    #[cfg(target_pointer_width = "64")]
+    {
+        a + b + c
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        a.checked_add(b)
+            .and_then(|ab| ab.checked_add(c))
+            .expect("NBT output buffer length overflow")
+    }
+}
+
 impl ByteSink for Vec<u8> {
     type Error = Infallible;
 
@@ -162,7 +176,7 @@ impl ByteSink for Vec<u8> {
 
     #[inline(always)]
     fn write_3(&mut self, a: &[u8], b: &[u8], c: &[u8]) -> core::result::Result<(), Infallible> {
-        let total = a.len() + b.len() + c.len();
+        let total = checked_len_add3(a.len(), b.len(), c.len());
         let old_len = self.len();
         Vec::reserve(self, total);
         unsafe {
@@ -200,7 +214,7 @@ impl ByteSink for Vec<u8> {
         hdr: [u8; 2],
         body: &[u8],
     ) -> core::result::Result<(), Infallible> {
-        let total = prefix.len() + 2 + body.len();
+        let total = checked_len_add3(prefix.len(), 2, body.len());
         let old_len = self.len();
         Vec::reserve(self, total);
         unsafe {
@@ -239,7 +253,7 @@ impl ByteSink for Vec<u8> {
         hdr: [u8; 4],
         body: &[u8],
     ) -> core::result::Result<(), Infallible> {
-        let total = prefix.len() + 4 + body.len();
+        let total = checked_len_add3(prefix.len(), 4, body.len());
         let old_len = self.len();
         Vec::reserve(self, total);
         unsafe {
@@ -349,8 +363,8 @@ fn value_payload_size_hint<S: Source>(val: ValueRef<'_, S>) -> usize {
         ValueRef::String(v) => 2 + v.len(),
         ValueRef::IntArray(v) => 4 + v.len() * 4,
         ValueRef::LongArray(v) => 4 + v.len() * 8,
-        ValueRef::List(v) => S::list_size_hint(v.cursor),
-        ValueRef::Compound(v) => S::compound_size_hint(v.cursor),
+        ValueRef::List(v) => unsafe { S::list_size_hint(v.cursor) },
+        ValueRef::Compound(v) => unsafe { S::compound_size_hint(v.cursor) },
     }
 }
 
@@ -398,8 +412,12 @@ pub(crate) fn write_value_with_header<S: Source, TARGET: ByteOrder, Sink: ByteSi
             swap_u64::<S::Order, TARGET>,
             sink,
         ),
-        ValueRef::List(v) => S::write_list_with_header::<TARGET, Sink>(hdr, v.cursor, sink),
-        ValueRef::Compound(v) => S::write_compound_with_header::<TARGET, Sink>(hdr, v.cursor, sink),
+        ValueRef::List(v) => unsafe {
+            S::write_list_with_header::<TARGET, Sink>(hdr, v.cursor, sink)
+        },
+        ValueRef::Compound(v) => unsafe {
+            S::write_compound_with_header::<TARGET, Sink>(hdr, v.cursor, sink)
+        },
     }
 }
 
@@ -544,7 +562,7 @@ fn write_value_to_vec<S: Source, TARGET: ByteOrder, const NAMELESS: bool>(
             );
             out
         }
-        ValueRef::List(v) => {
+        ValueRef::List(v) => unsafe {
             let mut out = Vec::with_capacity(hdr_len + S::list_size_hint(v.cursor));
             let _ = S::write_list_with_header::<TARGET, Vec<u8>>(
                 hdr_for!(TagID::List),
@@ -552,8 +570,8 @@ fn write_value_to_vec<S: Source, TARGET: ByteOrder, const NAMELESS: bool>(
                 &mut out,
             );
             out
-        }
-        ValueRef::Compound(v) => {
+        },
+        ValueRef::Compound(v) => unsafe {
             let mut out = Vec::with_capacity(hdr_len + S::compound_size_hint(v.cursor));
             let _ = S::write_compound_with_header::<TARGET, Vec<u8>>(
                 hdr_for!(TagID::Compound),
@@ -561,7 +579,7 @@ fn write_value_to_vec<S: Source, TARGET: ByteOrder, const NAMELESS: bool>(
                 &mut out,
             );
             out
-        }
+        },
     }
 }
 

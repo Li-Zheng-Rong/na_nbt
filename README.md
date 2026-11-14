@@ -101,6 +101,8 @@ struct ItemSlot<'a> {
     // Keep dynamic or version-dependent subtrees as zero-copy `BorrowedDocument` or mutable `Compound`!
     #[serde(borrow)]
     components: BorrowedDocument<'a>,
+    // Note: `#[serde(flatten)]` buffers through serde's generic `Content`, so flattened
+    // `IntArray` / `LongArray` fields deserialize as `List` rather than typed arrays.
     #[serde(flatten)]
     extra: Compound,
 }

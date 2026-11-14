@@ -1446,20 +1446,29 @@ impl<'de, O: ByteOrder> EnumAccess<'de> for RawNbtAccess<'_, 'de, O> {
     }
 }
 
+#[cold]
+fn raw_nbt_misuse() -> Error {
+    Error::MSG("`na_nbt:raw_nbt` expects tuple_variant consumption".into())
+}
+
 impl<'de, O: ByteOrder> VariantAccess<'de> for RawNbtAccess<'_, 'de, O> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
-        unreachable!()
+        Err(raw_nbt_misuse())
     }
 
     fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(self, _: T) -> Result<T::Value> {
-        unreachable!()
+        Err(raw_nbt_misuse())
     }
 
     #[inline]
     fn tuple_variant<V: de::Visitor<'de>>(self, consumed: usize, visitor: V) -> Result<V::Value> {
-        self.deserializer.input = &self.deserializer.input[consumed..];
+        let Some(rest) = self.deserializer.input.get(consumed..) else {
+            cold_path();
+            return Err(Error::EOF);
+        };
+        self.deserializer.input = rest;
         visitor.visit_unit()
     }
 
@@ -1468,6 +1477,6 @@ impl<'de, O: ByteOrder> VariantAccess<'de> for RawNbtAccess<'_, 'de, O> {
         _: &'static [&'static str],
         _: V,
     ) -> Result<V::Value> {
-        unreachable!()
+        Err(raw_nbt_misuse())
     }
 }

@@ -3,11 +3,11 @@
 //! it keeps the structured path's error behavior.
 
 use na_nbt::{
-    read_borrowed_be, read_owned, read_shared_be, tag_of, to_vec, to_vec_be, to_vec_le,
-    write_named_to_vec, BigEndian, ByteOrder, Compound, CompoundRef, Error, List, LittleEndian,
-    MUTF8String, TagID, TypedList, Value,
+    from_slice_be, from_slice_le, read_borrowed_be, read_owned, read_shared_be, tag_of, to_vec,
+    to_vec_be, to_vec_le, write_named_to_vec, BigEndian, ByteOrder, Compound, CompoundRef, Error,
+    List, LittleEndian, MUTF8String, TagID, TypedList, Value,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const CORPUS: &[(&str, &[u8])] = &[
     ("bigtest", include_bytes!("../fuzz/in/bigtest")),
@@ -297,4 +297,247 @@ fn tag_probe_handles_fallible_serialize_without_ub() {
     assert!(err.to_string().contains("boom"), "{err}");
     let err = to_vec_be(&Wrap { fail: FailSer }).unwrap_err();
     assert!(err.to_string().contains("boom"), "{err}");
+}
+
+#[test]
+fn raw_payload_sink_handles_unaligned_u16_and_u32_headers() {
+    // Odd-length compound keys force subsequent u16/u32 length prefixes onto odd byte offsets.
+    let mut comp = Compound::<BigEndian>::new();
+    comp.insert("a", "hello");
+    comp.insert("bc", vec![1i8, 2, 3]);
+    comp.insert("def", vec![10i32, 20, 30]);
+    comp.insert("g", vec![100i64, 200]);
+
+    let mut list_str = List::<BigEndian>::new();
+    list_str.push("alpha");
+    list_str.push("beta");
+    comp.insert("ij", list_str);
+
+    let mut list_arr = List::<BigEndian>::new();
+    list_arr.push(vec![7i8, 8, 9]);
+    comp.insert("klm", list_arr);
+
+    assert_eq!(to_vec_be(&comp).unwrap(), comp.write_to_vec_be());
+    assert_eq!(to_vec_le(&comp).unwrap(), comp.write_to_vec_le());
+}
+
+#[test]
+fn seq_and_list_serializers_patch_actual_element_counts() {
+    #[derive(Clone, Copy)]
+    struct WrongHintSeq<'a>(&'a [i32], Option<usize>);
+    impl Serialize for WrongHintSeq<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(self.1)?;
+            for &v in self.0 {
+                seq.serialize_element(&v)?;
+            }
+            seq.end()
+        }
+    }
+
+    #[derive(Clone)]
+    struct WrongHintIter<'a>(&'a [i32], usize, Option<usize>);
+    impl<'a> Iterator for WrongHintIter<'a> {
+        type Item = &'a i32;
+        fn next(&mut self) -> Option<Self::Item> {
+            let v = self.0.get(self.1)?;
+            self.1 += 1;
+            Some(v)
+        }
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, self.2)
+        }
+    }
+    impl<'a> IntoIterator for &WrongHintSeq<'a> {
+        type Item = &'a i32;
+        type IntoIter = WrongHintIter<'a>;
+        fn into_iter(self) -> Self::IntoIter {
+            WrongHintIter(self.0, 0, self.1)
+        }
+    }
+
+    #[derive(Serialize)]
+    struct ListHolder<'a> {
+        #[serde(with = "na_nbt::list")]
+        a: WrongHintSeq<'a>,
+        #[serde(with = "na_nbt::list")]
+        empty_overestimated: WrongHintSeq<'a>,
+        hetero: WrongHintSeq<'a>,
+    }
+
+    let holder = ListHolder {
+        a: WrongHintSeq(&[10, 20, 30], Some(1)),
+        empty_overestimated: WrongHintSeq(&[], Some(5)),
+        hetero: WrongHintSeq(&[7, 8], Some(99)),
+    };
+    let bytes = to_vec_be(&holder).unwrap();
+    let doc = read_borrowed_be(&bytes).unwrap();
+    let a: Vec<i32> = doc.get_as::<TypedList<i32>>("a").unwrap().iter().collect();
+    assert_eq!(a, vec![10, 20, 30]);
+    let empty = doc.get_list("empty_overestimated").unwrap();
+    assert_eq!(empty.element_tag_id(), TagID::End);
+    assert_eq!(empty.len(), 0);
+    assert_eq!(doc.get_list("hetero").unwrap().len(), 2);
+
+    // Oversized hint (> u32::MAX) on 64-bit must be rejected immediately.
+    #[cfg(target_pointer_width = "64")]
+    {
+        let huge = WrongHintSeq(&[], Some(u32::MAX as usize + 1));
+        assert!(to_vec_be(&huge).is_err());
+    }
+}
+
+#[test]
+fn tuple_and_map_serializers_reject_mismatched_calls_safely() {
+    struct UnderTuple;
+    impl Serialize for UnderTuple {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeTuple;
+            let mut tup = serializer.serialize_tuple(3)?;
+            tup.serialize_element(&1i32)?;
+            tup.end()
+        }
+    }
+
+    struct OverTuple;
+    impl Serialize for OverTuple {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeTuple;
+            let mut tup = serializer.serialize_tuple(1)?;
+            tup.serialize_element(&1i32)?;
+            tup.serialize_element(&2i32)?;
+            tup.end()
+        }
+    }
+
+    struct ValueWithoutKeyMap;
+    impl Serialize for ValueWithoutKeyMap {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_value(&42i32)?;
+            map.end()
+        }
+    }
+
+    struct UnpairedKeyMap;
+    impl Serialize for UnpairedKeyMap {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_key("orphan")?;
+            map.end()
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Holder<T> {
+        v: T,
+    }
+
+    assert!(to_vec_be(&Holder { v: UnderTuple }).is_err());
+    assert!(to_vec_be(&Holder { v: OverTuple }).is_err());
+    assert!(to_vec_be(&ValueWithoutKeyMap).is_err());
+    assert!(to_vec_be(&UnpairedKeyMap).is_err());
+}
+
+#[test]
+fn magic_markers_return_errors_instead_of_panicking_on_misuse() {
+    struct BadMarker(&'static str);
+    impl Serialize for BadMarker {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_newtype_struct(self.0, &"not_expected_payload")
+        }
+    }
+
+    struct WrongElemIntArray;
+    impl Serialize for WrongElemIntArray {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_newtype_struct("na_nbt:int_array", &(1i64, 2i64))
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Wrap<T> {
+        x: T,
+    }
+
+    for marker in [
+        "na_nbt:int_array",
+        "na_nbt:long_array",
+        "na_nbt:list",
+        "na_nbt:mutf8",
+    ] {
+        assert!(to_vec_be(&Wrap {
+            x: BadMarker(marker)
+        })
+        .is_err());
+    }
+    assert!(to_vec_be(&Wrap {
+        x: WrongElemIntArray
+    })
+    .is_err());
+
+    // Deserializer misuse of `na_nbt:raw_nbt` must also return `Err` rather than panicking.
+    struct BadRawNbt;
+    impl<'de> Deserialize<'de> for BadRawNbt {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = BadRawNbt;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("bad raw_nbt")
+                }
+                fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                    self,
+                    data: A,
+                ) -> Result<Self::Value, A::Error> {
+                    use serde::de::VariantAccess;
+                    let ((_hdr, _slice), variant): ((u8, &'de [u8]), _) = data.variant()?;
+                    variant.unit_variant()?;
+                    Ok(BadRawNbt)
+                }
+            }
+            deserializer.deserialize_newtype_struct("na_nbt:raw_nbt", V)
+        }
+    }
+
+    let valid = Compound::<BigEndian>::new().write_to_vec_be();
+    assert!(from_slice_be::<BadRawNbt>(&valid).is_err());
+}
+
+#[cfg(feature = "shared")]
+#[test]
+fn shared_document_serde_roundtrip() {
+    #[derive(Serialize, Deserialize)]
+    struct Envelope {
+        id: i32,
+        payload: na_nbt::SharedDocument<BigEndian>,
+    }
+
+    let mut inner = Compound::<BigEndian>::new();
+    inner.insert("msg", "shared-ok");
+    inner.insert("nums", vec![1i32, 2, 3]);
+    let shared = na_nbt::read_shared_be(inner.write_to_vec_be().into()).unwrap();
+
+    let env = Envelope {
+        id: 7,
+        payload: shared,
+    };
+    let wire_be = to_vec_be(&env).unwrap();
+    let decoded_slice: Envelope = from_slice_be(&wire_be).unwrap();
+    assert_eq!(decoded_slice.id, 7);
+    assert_eq!(
+        decoded_slice.payload.get_str("msg").as_deref(),
+        Some("shared-ok")
+    );
+
+    let decoded_reader: Envelope = na_nbt::from_reader_be(std::io::Cursor::new(&wire_be)).unwrap();
+    assert_eq!(decoded_reader.payload, decoded_slice.payload);
+
+    // Cross-endian deserialization (LE wire -> SharedDocument<BigEndian>)
+    let wire_le = to_vec_le(&env).unwrap();
+    let decoded_cross: Envelope = from_slice_le(&wire_le).unwrap();
+    assert_eq!(decoded_cross.payload, decoded_slice.payload);
 }

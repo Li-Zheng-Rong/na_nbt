@@ -591,7 +591,7 @@ impl<'a, S: Source> CompoundRef<'a, S> {
     /// Clones this compound view into an owned [`Compound<TARGET>`].
     #[inline]
     pub fn to_owned_compound<TARGET: ByteOrder>(&self) -> Compound<TARGET> {
-        S::compound_to_owned::<TARGET>(self.cursor)
+        unsafe { S::compound_to_owned::<TARGET>(self.cursor) }
     }
 
     /// Entry-by-entry conversion, used where a [`Source`] has no bulk path.
@@ -662,7 +662,7 @@ impl<'a, S: Source> Iterator for CompoundIter<'a, S> {
 /// Single-dispatch homogeneous view of a [`ListRef`], matching `element_tag_id` once outside
 /// element loops and exposing contiguous slices directly for numeric primitives.
 pub enum ListKind<'a, S: Source = Borrowed<BigEndian>> {
-    /// Empty `TAG_End` list (`len == 0`).
+    /// `TAG_End` list (typically empty; check [`ListRef::len`] when non-zero `TAG_End` counts matter).
     Empty,
     /// Homogeneous list of `TAG_Byte` (`&[i8]`).
     Byte(&'a [i8]),
@@ -946,7 +946,7 @@ impl<'a, S: Source> ListRef<'a, S> {
         if len == 0 {
             return List::with_tag_id(tag_id);
         }
-        S::list_to_owned::<TARGET>(self.cursor)
+        unsafe { S::list_to_owned::<TARGET>(self.cursor) }
     }
 
     /// Element-by-element conversion, used where a [`Source`] has no bulk path.
@@ -1348,7 +1348,7 @@ impl<'a, T: ?Sized + ElementTag, S: Source> AsValueRef<'a> for &TypedListRef<'a,
     }
 }
 
-impl<'a, O: ByteOrder, B: AsRef<[u8]>> AsValueRef<'a> for &'a Document<O, B> {
+impl<'a, O: ByteOrder, B: crate::DocumentBuffer> AsValueRef<'a> for &'a Document<O, B> {
     type Source = Borrowed<O>;
     #[inline(always)]
     fn as_value_ref(self) -> ValueRef<'a, Borrowed<O>> {

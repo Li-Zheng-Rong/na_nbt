@@ -352,9 +352,9 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
     type Error = Error;
 
     type SerializeSeq = SeqSerializer<'a, O>;
-    type SerializeTuple = Self;
-    type SerializeTupleStruct = Self;
-    type SerializeTupleVariant = Self;
+    type SerializeTuple = TupleSerializer<'a, O>;
+    type SerializeTupleStruct = TupleSerializer<'a, O>;
+    type SerializeTupleVariant = TupleSerializer<'a, O>;
     type SerializeMap = MapSerializer<'a, O>;
     type SerializeStruct = Self;
     type SerializeStructVariant = Self;
@@ -514,26 +514,24 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
 
     #[inline]
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        if let Some(n) = len {
-            if n > u32::MAX as usize {
+        let extra = match len {
+            Some(n) if n > u32::MAX as usize => {
                 cold_path();
                 return Err(Error::LEN(n));
             }
-        }
-        let list_len = len.map_or(Some(0), |_| None);
+            Some(n) => n.min(4096) * 4,
+            None => 0,
+        };
         unsafe {
             let old_len = self.vec.len();
-            self.vec.reserve(5);
+            self.vec.reserve(5 + extra);
             let p = self.vec.as_mut_ptr().add(old_len);
             ptr::write(p, TagID::Compound as u8);
-            ptr::write(
-                p.add(1).cast::<[u8; 4]>(),
-                byteorder::U32::<O>::new(len.unwrap_or(0) as u32).to_bytes(),
-            );
+            ptr::write(p.add(1).cast::<[u8; 4]>(), [0u8; 4]);
             self.vec.set_len(old_len + 5);
             Ok(SeqSerializer {
                 len_pos: old_len + 1,
-                len: list_len,
+                count: 0,
                 serializer: &mut *self,
             })
         }
@@ -542,7 +540,11 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
     #[inline]
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
         self.write_wrapped_list_header(len)?;
-        Ok(&mut *self)
+        Ok(TupleSerializer {
+            remaining: len,
+            close_compound: false,
+            serializer: &mut *self,
+        })
     }
 
     #[inline]
@@ -574,7 +576,11 @@ impl<'a, O: ByteOrder> ser::Serializer for &'a mut Serializer<O> {
             }
             Ok(())
         })?;
-        Ok(&mut *self)
+        Ok(TupleSerializer {
+            remaining: len,
+            close_compound: true,
+            serializer: &mut *self,
+        })
     }
 
     #[inline]
@@ -708,16 +714,25 @@ impl<'a, O: ByteOrder, const N: usize> FixedArraySerializer<'a, O, N> {
     }
 }
 
+#[cold]
+fn invalid_marker_use(marker: &'static str) -> Error {
+    Error::MSG(format!("invalid payload for `{marker}`"))
+}
+
 impl<O: ByteOrder, const N: usize> ser::Serializer for FixedArraySerializer<'_, O, N> {
     type Ok = ();
     type Error = Error;
     type SerializeSeq = ser::Impossible<(), Error>;
     type SerializeTuple = Self;
 
-    impl_reject_compounds!(unreachable!());
-    impl_reject_non_container!(unreachable!());
+    impl_reject_compounds!(Err(invalid_marker_use(
+        "na_nbt:int_array/na_nbt:long_array"
+    )));
+    impl_reject_non_container!(Err(invalid_marker_use(
+        "na_nbt:int_array/na_nbt:long_array"
+    )));
     impl_reject_primitives!(
-        unreachable!();
+        Err(invalid_marker_use("na_nbt:int_array/na_nbt:long_array"));
         serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
         serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
         serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
@@ -725,7 +740,7 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedArraySerializer<'_, 
     );
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:int_array/na_nbt:long_array"))
     }
 
     #[inline]
@@ -790,10 +805,14 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
     type SerializeSeq = ser::Impossible<(), Error>;
     type SerializeTuple = ser::Impossible<(), Error>;
 
-    impl_reject_compounds!(unreachable!());
-    impl_reject_non_container!(unreachable!());
+    impl_reject_compounds!(Err(invalid_marker_use(
+        "na_nbt:int_array/na_nbt:long_array"
+    )));
+    impl_reject_non_container!(Err(invalid_marker_use(
+        "na_nbt:int_array/na_nbt:long_array"
+    )));
     impl_reject_primitives!(
-        unreachable!();
+        Err(invalid_marker_use("na_nbt:int_array/na_nbt:long_array"));
         serialize_bool: bool, serialize_i8: i8, serialize_i16: i16,
         serialize_u8: u8, serialize_u16: u16,
         serialize_f32: f32, serialize_f64: f64, serialize_char: char,
@@ -802,7 +821,9 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
 
     #[inline(always)]
     fn serialize_i32(self, v: i32) -> Result<()> {
-        assert_eq!(N, 4);
+        if const { N != 4 } {
+            return Err(invalid_marker_use("na_nbt:long_array"));
+        }
         unsafe {
             ptr::write(
                 (*self.0).cast::<[u8; 4]>(),
@@ -820,7 +841,9 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
 
     #[inline(always)]
     fn serialize_i64(self, v: i64) -> Result<()> {
-        assert_eq!(N, 8);
+        if const { N != 8 } {
+            return Err(invalid_marker_use("na_nbt:int_array"));
+        }
         unsafe {
             ptr::write(
                 (*self.0).cast::<[u8; 8]>(),
@@ -837,11 +860,11 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:int_array/na_nbt:long_array"))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:int_array/na_nbt:long_array"))
     }
 }
 
@@ -849,7 +872,7 @@ impl<O: ByteOrder, const N: usize> ser::Serializer for FixedElemSerializer<'_, O
 struct ListSerializer<'a, O: ByteOrder> {
     start_pos: usize,
     element_tag: Option<TagID>,
-    len: Option<u32>,
+    count: u32,
     serializer: &'a mut Serializer<O>,
 }
 
@@ -859,7 +882,7 @@ impl<'a, O: ByteOrder> ListSerializer<'a, O> {
         Self {
             start_pos: serializer.vec.len(),
             element_tag: None,
-            len: Some(0),
+            count: 0,
             serializer,
         }
     }
@@ -871,10 +894,10 @@ impl<O: ByteOrder> ser::Serializer for ListSerializer<'_, O> {
     type SerializeSeq = Self;
     type SerializeTuple = ser::Impossible<(), Error>;
 
-    impl_reject_compounds!(unreachable!());
-    impl_reject_non_container!(unreachable!());
+    impl_reject_compounds!(Err(invalid_marker_use("na_nbt:list")));
+    impl_reject_non_container!(Err(invalid_marker_use("na_nbt:list")));
     impl_reject_primitives!(
-        unreachable!();
+        Err(invalid_marker_use("na_nbt:list"));
         serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
         serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
         serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
@@ -883,19 +906,33 @@ impl<O: ByteOrder> ser::Serializer for ListSerializer<'_, O> {
 
     #[inline]
     fn serialize_seq(mut self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        if len.is_some() {
-            self.len = None;
-        }
-        self.serializer
-            .write_wrapped_list_header(len.unwrap_or(0))?;
-        if let Some(n) = len {
-            self.serializer.vec.reserve(n.min(4096) * 4);
+        let extra = match len {
+            Some(n) if n > u32::MAX as usize => {
+                cold_path();
+                return Err(Error::LEN(n));
+            }
+            Some(n) => n.min(4096) * 4,
+            None => 0,
+        };
+        unsafe {
+            let old_len = self.serializer.vec.len();
+            self.start_pos = old_len;
+            self.serializer.vec.reserve(5 + extra);
+            ptr::write(
+                self.serializer
+                    .vec
+                    .as_mut_ptr()
+                    .add(old_len)
+                    .cast::<[u8; 5]>(),
+                [0u8; 5],
+            );
+            self.serializer.vec.set_len(old_len + 5);
         }
         Ok(self)
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:list"))
     }
 }
 
@@ -905,12 +942,11 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
 
     #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        if let Some(len) = self.len {
-            if len == u32::MAX {
-                return Err(Error::LEN(len as usize));
-            }
-            self.len = Some(len + 1);
+        if self.count == u32::MAX {
+            cold_path();
+            return Err(Error::LEN(self.count as usize));
         }
+        self.count += 1;
         let tag_id = probe_tag_id(value)?;
         let expected = match self.element_tag {
             Some(expected) => expected,
@@ -935,12 +971,10 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
         unsafe {
             let base = self.serializer.vec.as_mut_ptr().add(self.start_pos);
             ptr::write(base, self.element_tag.unwrap_or(TagID::End) as u8);
-            if let Some(len) = self.len {
-                ptr::write(
-                    base.add(1).cast::<[u8; 4]>(),
-                    byteorder::U32::<O>::new(len).to_bytes(),
-                );
-            }
+            ptr::write(
+                base.add(1).cast::<[u8; 4]>(),
+                byteorder::U32::<O>::new(self.count).to_bytes(),
+            );
         }
         Ok(())
     }
@@ -949,7 +983,7 @@ impl<O: ByteOrder> ser::SerializeSeq for ListSerializer<'_, O> {
 /// Heterogeneous sequence serializer wrapping each element as `Compound { "" : <value> }`.
 pub struct SeqSerializer<'a, O: ByteOrder = BigEndian> {
     len_pos: usize,
-    len: Option<u32>,
+    count: u32,
     serializer: &'a mut Serializer<O>,
 }
 
@@ -957,73 +991,105 @@ impl<O: ByteOrder> ser::SerializeSeq for SeqSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        if let Some(len) = self.len {
+        if self.count == u32::MAX {
             cold_path();
-            if len == u32::MAX {
-                cold_path();
-                return Err(Error::LEN(len as usize));
-            }
-            self.len = Some(len + 1);
+            return Err(Error::LEN(self.count as usize));
         }
+        self.count += 1;
         self.serializer.write_wrapped_item(value)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
-        if let Some(len) = self.len {
-            cold_path();
-            unsafe {
-                ptr::write(
-                    self.serializer
-                        .vec
-                        .as_mut_ptr()
-                        .add(self.len_pos)
-                        .cast::<[u8; 4]>(),
-                    byteorder::U32::<O>::new(len).to_bytes(),
-                );
-            }
+        unsafe {
+            ptr::write(
+                self.serializer
+                    .vec
+                    .as_mut_ptr()
+                    .add(self.len_pos)
+                    .cast::<[u8; 4]>(),
+                byteorder::U32::<O>::new(self.count).to_bytes(),
+            );
         }
         Ok(())
     }
 }
 
-impl<O: ByteOrder> ser::SerializeTuple for &mut Serializer<O> {
+/// Fixed-arity heterogeneous tuple serializer wrapping each element as `Compound { "" : <value> }`.
+pub struct TupleSerializer<'a, O: ByteOrder = BigEndian> {
+    remaining: usize,
+    close_compound: bool,
+    serializer: &'a mut Serializer<O>,
+}
+
+impl<O: ByteOrder> TupleSerializer<'_, O> {
+    #[inline]
+    fn push_item<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
+        if self.remaining == 0 {
+            cold_path();
+            return Err(Error::LEN(0));
+        }
+        self.remaining -= 1;
+        self.serializer.write_wrapped_item(value)
+    }
+
+    #[inline]
+    fn finish(self) -> Result<()> {
+        if self.remaining != 0 {
+            cold_path();
+            return Err(Error::LEN(self.remaining));
+        }
+        if self.close_compound {
+            self.serializer.vec.push(TagID::End as u8);
+        }
+        Ok(())
+    }
+}
+
+impl<O: ByteOrder> ser::SerializeTuple for TupleSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.write_wrapped_item(value)
+        self.push_item(value)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
-        Ok(())
+        self.finish()
     }
 }
 
-impl<O: ByteOrder> ser::SerializeTupleStruct for &mut Serializer<O> {
+impl<O: ByteOrder> ser::SerializeTupleStruct for TupleSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.write_wrapped_item(value)
+        self.push_item(value)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
-        Ok(())
+        self.finish()
     }
 }
 
-impl<O: ByteOrder> ser::SerializeTupleVariant for &mut Serializer<O> {
+impl<O: ByteOrder> ser::SerializeTupleVariant for TupleSerializer<'_, O> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        self.write_wrapped_item(value)
+        self.push_item(value)
     }
 
+    #[inline]
     fn end(self) -> Result<()> {
-        self.vec.push(TagID::End as u8);
-        Ok(())
+        self.finish()
     }
 }
 
@@ -1171,10 +1237,10 @@ impl<O: ByteOrder> ser::Serializer for RawMutf8Serializer<'_, O> {
     type SerializeSeq = ser::Impossible<(), Error>;
     type SerializeTuple = ser::Impossible<(), Error>;
 
-    impl_reject_compounds!(unreachable!());
-    impl_reject_non_container!(unreachable!());
+    impl_reject_compounds!(Err(invalid_marker_use("na_nbt:mutf8")));
+    impl_reject_non_container!(Err(invalid_marker_use("na_nbt:mutf8")));
     impl_reject_primitives!(
-        unreachable!();
+        Err(invalid_marker_use("na_nbt:mutf8"));
         serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
         serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
         serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
@@ -1192,11 +1258,11 @@ impl<O: ByteOrder> ser::Serializer for RawMutf8Serializer<'_, O> {
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:mutf8"))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:mutf8"))
     }
 }
 
@@ -1211,10 +1277,10 @@ impl<O: ByteOrder> ser::Serializer for RawMutf8KeySerializer<'_, O> {
     type SerializeSeq = ser::Impossible<(), Error>;
     type SerializeTuple = ser::Impossible<(), Error>;
 
-    impl_reject_compounds!(unreachable!());
-    impl_reject_non_container!(unreachable!());
+    impl_reject_compounds!(Err(invalid_marker_use("na_nbt:mutf8")));
+    impl_reject_non_container!(Err(invalid_marker_use("na_nbt:mutf8")));
     impl_reject_primitives!(
-        unreachable!();
+        Err(invalid_marker_use("na_nbt:mutf8"));
         serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
         serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
         serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
@@ -1232,11 +1298,11 @@ impl<O: ByteOrder> ser::Serializer for RawMutf8KeySerializer<'_, O> {
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:mutf8"))
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
-        unreachable!()
+        Err(invalid_marker_use("na_nbt:mutf8"))
     }
 }
 
@@ -1307,7 +1373,10 @@ impl<O: ByteOrder> ser::Serializer for RawPayloadSink<'_, O> {
         let old_len = self.0.vec.len();
         self.0.vec.reserve(2);
         unsafe {
-            ptr::write(self.0.vec.as_mut_ptr().add(old_len).cast::<u16>(), ne_hdr);
+            ptr::write(
+                self.0.vec.as_mut_ptr().add(old_len).cast::<[u8; 2]>(),
+                ne_hdr.to_ne_bytes(),
+            );
             self.0.vec.set_len(old_len + 2);
         }
         Ok(())
@@ -1318,7 +1387,10 @@ impl<O: ByteOrder> ser::Serializer for RawPayloadSink<'_, O> {
         let old_len = self.0.vec.len();
         self.0.vec.reserve(4);
         unsafe {
-            ptr::write(self.0.vec.as_mut_ptr().add(old_len).cast::<u32>(), ne_hdr);
+            ptr::write(
+                self.0.vec.as_mut_ptr().add(old_len).cast::<[u8; 4]>(),
+                ne_hdr.to_ne_bytes(),
+            );
             self.0.vec.set_len(old_len + 4);
         }
         Ok(())
@@ -1449,6 +1521,11 @@ impl<O: ByteOrder> ser::SerializeSeq for RawPayloadSink<'_, O> {
     }
 }
 
+#[cold]
+fn map_state_error() -> Error {
+    Error::MSG("invalid SerializeMap call sequence (unpaired key or value)".into())
+}
+
 /// NBT map serializer writing entries to a `TAG_Compound`.
 pub struct MapSerializer<'a, O: ByteOrder = BigEndian> {
     tag_pos: usize,
@@ -1461,24 +1538,33 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
 
     #[inline]
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<()> {
-        debug_assert_eq!(self.tag_pos, usize::MAX);
-        self.tag_pos = self.serializer.vec.len();
+        if self.tag_pos != usize::MAX {
+            cold_path();
+            return Err(map_state_error());
+        }
+        let pos = self.serializer.vec.len();
         key.serialize(KeySerializer {
             tag_id: TagID::End,
             serializer: self.serializer,
-        })
+        })?;
+        self.tag_pos = pos;
+        Ok(())
     }
 
     #[inline]
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
-        debug_assert_ne!(self.tag_pos, usize::MAX);
+        let tag_pos = self.tag_pos;
+        if tag_pos >= self.serializer.vec.len() {
+            cold_path();
+            return Err(map_state_error());
+        }
+        self.tag_pos = usize::MAX;
         let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
             return Err(Error::INVALID(0));
         }
-        unsafe { *self.serializer.vec.get_unchecked_mut(self.tag_pos) = tag_id as u8 };
-        self.tag_pos = usize::MAX;
+        self.serializer.vec[tag_pos] = tag_id as u8;
         value.serialize(&mut *self.serializer)
     }
 
@@ -1488,7 +1574,10 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
         key: &K,
         value: &V,
     ) -> Result<()> {
-        debug_assert_eq!(self.tag_pos, usize::MAX);
+        if self.tag_pos != usize::MAX {
+            cold_path();
+            return Err(map_state_error());
+        }
         let tag_id = probe_tag_id(value)?;
         if tag_id == TagID::End {
             cold_path();
@@ -1503,6 +1592,10 @@ impl<O: ByteOrder> ser::SerializeMap for MapSerializer<'_, O> {
 
     #[inline]
     fn end(self) -> Result<()> {
+        if self.tag_pos != usize::MAX {
+            cold_path();
+            return Err(map_state_error());
+        }
         self.serializer.vec.push(TagID::End as u8);
         Ok(())
     }

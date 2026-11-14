@@ -363,7 +363,7 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline]
-    fn compound_to_owned<TARGET: ByteOrder>(
+    unsafe fn compound_to_owned<TARGET: ByteOrder>(
         cursor: Self::CompoundCursor<'_>,
     ) -> crate::Compound<TARGET> {
         unsafe {
@@ -376,7 +376,9 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline]
-    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> crate::List<TARGET> {
+    unsafe fn list_to_owned<TARGET: ByteOrder>(
+        cursor: Self::ListCursor<'_>,
+    ) -> crate::List<TARGET> {
         unsafe {
             let (tag_id, len) = Self::list_header(cursor);
             if len == 0 {
@@ -388,7 +390,7 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline(always)]
-    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
+    unsafe fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize {
         if unsafe { *cursor.ptr == 0 } {
             1
         } else {
@@ -397,7 +399,7 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline(always)]
-    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
+    unsafe fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize {
         let (tag_id, len) = unsafe { Self::list_header(cursor) };
         if tag_id.is_primitive() {
             5 + mutable_tag_size(tag_id) * len
@@ -407,7 +409,7 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline(always)]
-    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
         sink: &mut Sink,
@@ -424,7 +426,7 @@ impl<O: ByteOrder> Source for Owned<O> {
     }
 
     #[inline(always)]
-    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::ListCursor<'_>,
         sink: &mut Sink,

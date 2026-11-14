@@ -355,6 +355,11 @@ impl<O: ByteOrder> List<O> {
 
     /// Appends a value if its tag matches the list's element tag (or sets the element tag if the
     /// list is currently empty). Returns `Err(value)` without modifying the list on tag mismatch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.len() == u32::MAX`, or if a string `value` exceeds [`MUTF8String::MAX_LEN`]
+    /// bytes once MUTF-8 encoded (see [`IntoNBT`]).
     #[inline]
     pub fn try_push<V: IntoNBT<O>>(&mut self, value: V) -> core::result::Result<(), V> {
         let count = self.len();
@@ -373,8 +378,8 @@ impl<O: ByteOrder> List<O> {
     ///
     /// # Panics
     ///
-    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
-    /// encoded (see [`IntoNBT`]).
+    /// Panics if `self.len() == u32::MAX`, or if a string `value` is longer than
+    /// [`MUTF8String::MAX_LEN`] bytes once MUTF-8 encoded (see [`IntoNBT`]).
     #[inline]
     pub fn push<V: IntoNBT<O>>(&mut self, value: V) {
         let _ = self.try_push(value);
@@ -382,6 +387,10 @@ impl<O: ByteOrder> List<O> {
 
     /// Appends a dynamically typed [`Value`], returning `Err(value)` if the list is non-empty with
     /// a different element tag.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.len() == u32::MAX`.
     #[inline]
     pub fn push_value(&mut self, value: Value<O>) -> core::result::Result<(), Value<O>> {
         let count = self.len();
@@ -462,8 +471,8 @@ impl<O: ByteOrder> List<O> {
     ///
     /// # Panics
     ///
-    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
-    /// encoded (see [`IntoNBT`]).
+    /// Panics if `self.len() == u32::MAX`, or if a string `value` is longer than
+    /// [`MUTF8String::MAX_LEN`] bytes once MUTF-8 encoded (see [`IntoNBT`]).
     #[inline]
     pub fn insert<V: IntoNBT<O>>(&mut self, index: usize, value: V) {
         let count = self.len();
@@ -932,8 +941,8 @@ impl<T: ?Sized + ElementTag, O: ByteOrder> TypedList<T, O> {
     ///
     /// # Panics
     ///
-    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
-    /// encoded (see [`IntoNBT`]).
+    /// Panics if `self.len() == u32::MAX`, or if a string `value` is longer than
+    /// [`MUTF8String::MAX_LEN`] bytes once MUTF-8 encoded (see [`IntoNBT`]).
     #[inline]
     pub fn push(&mut self, value: impl IntoNBT<O, Tag = T>) {
         let count = self.len();
@@ -964,8 +973,8 @@ impl<T: ?Sized + ElementTag, O: ByteOrder> TypedList<T, O> {
     ///
     /// # Panics
     ///
-    /// Panics if a string `value` is longer than [`MUTF8String::MAX_LEN`] bytes once MUTF-8
-    /// encoded (see [`IntoNBT`]).
+    /// Panics if `self.len() == u32::MAX`, or if a string `value` is longer than
+    /// [`MUTF8String::MAX_LEN`] bytes once MUTF-8 encoded (see [`IntoNBT`]).
     #[inline]
     pub fn insert(&mut self, index: usize, value: impl IntoNBT<O, Tag = T>) {
         let count = self.len();
@@ -1075,6 +1084,10 @@ impl<O: ByteOrder> TypedList<i8, O> {
     }
 
     /// Appends a slice of `i8` bytes in a single `memcpy`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resulting list length would exceed `u32::MAX`.
     #[inline]
     pub fn extend_from_slice(&mut self, src: &[i8]) {
         if src.is_empty() {
@@ -1141,6 +1154,10 @@ macro_rules! impl_typed_list_endian_slices {
                 }
 
                 /// Appends a slice of native elements in bulk.
+                ///
+                /// # Panics
+                ///
+                /// Panics if the resulting list length would exceed `u32::MAX`.
                 #[inline]
                 pub fn extend_from_slice(&mut self, src: &[$prim]) {
                     if src.is_empty() {

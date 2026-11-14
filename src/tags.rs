@@ -232,22 +232,24 @@ pub trait Source: private::SealedSource + Copy + Clone + Send + Sync + Sized + '
     ) -> &'a [byteorder::I64<Self::Order>];
 
     #[doc(hidden)]
-    fn compound_to_owned<TARGET: ByteOrder>(cursor: Self::CompoundCursor<'_>) -> Compound<TARGET>;
+    unsafe fn compound_to_owned<TARGET: ByteOrder>(
+        cursor: Self::CompoundCursor<'_>,
+    ) -> Compound<TARGET>;
     #[doc(hidden)]
-    fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> List<TARGET>;
+    unsafe fn list_to_owned<TARGET: ByteOrder>(cursor: Self::ListCursor<'_>) -> List<TARGET>;
 
     #[doc(hidden)]
-    fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize;
+    unsafe fn compound_size_hint(cursor: Self::CompoundCursor<'_>) -> usize;
     #[doc(hidden)]
-    fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize;
+    unsafe fn list_size_hint(cursor: Self::ListCursor<'_>) -> usize;
     #[doc(hidden)]
-    fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_compound_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::CompoundCursor<'_>,
         sink: &mut Sink,
     ) -> core::result::Result<(), Sink::Error>;
     #[doc(hidden)]
-    fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
+    unsafe fn write_list_with_header<TARGET: ByteOrder, Sink: ByteSink>(
         hdr: &[u8],
         cursor: Self::ListCursor<'_>,
         sink: &mut Sink,
